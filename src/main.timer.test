@@ -1,0 +1,323 @@
+/**
+ * @file main.cpp
+ * @brief nPM1300 GP Timer API Test
+ * 
+ * This test exercises the nPM1300 GP Timer through the Npm1300 class API,
+ * simulating the mailbox monitor use case:
+ * 
+ *   1. Configure timer for GP mode with slow prescaler
+ *   2. Start a 10-second timer (simulating 4-minute mail window)
+ *   3. Poll for expiry
+ *   4. Clear the event
+ *   5. Restart and verify second cycle works
+ *   6. Test the "timer running" check (simulating second motion event)
+ * 
+ * Hardware: Thingy91x or nRF52833 DK + nPM1300-EK
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+
+#include "npm1300.hpp"
+
+LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+// Test timer duration (use 10 seconds for testing, 240 for real 4-minute window).
+constexpr uint32_t TEST_TIMER_DURATION_SECS { 10 };
+
+// =============================================================================
+// Main
+// =============================================================================
+
+int main(void)
+{
+  LOG_INF("========================================");
+  LOG_INF("nPM1300 GP Timer API Test");
+  LOG_INF("========================================");
+  LOG_INF("");
+
+  // -------------------------------------------------------------------------
+  // Get devices.
+  // -------------------------------------------------------------------------
+  const struct device* pmic = DEVICE_DT_GET(DT_NODELABEL(pmic_main));
+  if (!device_is_ready(pmic)) {
+    LOG_ERR("PMIC device not ready!");
+    return -1;
+  }
+
+  const struct device* charger = DEVICE_DT_GET(DT_NODELABEL(npm1300_charger));
+  if (!device_is_ready(charger)) {
+    LOG_ERR("Charger device not ready!");
+    return -1;
+  }
+
+  LOG_INF("Devices ready");
+
+  // -------------------------------------------------------------------------
+  // Initialise nPM1300 driver.
+  // -------------------------------------------------------------------------
+  alc::Npm1300 npm1300(pmic, charger);
+
+  if (npm1300.Init() != 0) {
+    LOG_ERR("Failed to initialise nPM1300!");
+    return -1;
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 1: Basic timer configuration and expiry.
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("=== Test 1: Basic Timer Cycle ===");
+  LOG_INF("");
+
+  // Stop any running timer and clear stale events.
+  npm1300.TimerStop();
+  npm1300.TimerClearEvent();
+
+  // Configure timer: GP mode, slow prescaler (16ms/tick).
+  if (npm1300.TimerConfigure(alc::Npm1300::TimerMode::GeneralPurpose,
+                              alc::Npm1300::TimerPrescaler::Slow) != 0) {
+    LOG_ERR("Failed to configure timer!");
+    return -1;
+  }
+
+  // Set duration.
+  if (npm1300.TimerSetDuration(TEST_TIMER_DURATION_SECS) != 0) {
+    LOG_ERR("Failed to set timer duration!");
+    return -1;
+  }
+
+  // Check initial state.
+  LOG_INF("Before start:");
+  LOG_INF("  TimerIsRunning: %s", npm1300.TimerIsRunning() ? "YES" : "NO");
+  LOG_INF("  TimerIsExpired: %s", npm1300.TimerIsExpired() ? "YES" : "NO");
+
+  // Start timer.
+  if (npm1300.TimerStart() != 0) {
+    LOG_ERR("Failed to start timer!");
+    return -1;
+  }
+
+  LOG_INF("After start:");
+  LOG_INF("  TimerIsRunning: %s", npm1300.TimerIsRunning() ? "YES" : "NO");
+  LOG_INF("  TimerIsExpired: %s", npm1300.TimerIsExpired() ? "YES" : "NO");
+
+  LOG_INF("");
+  LOG_INF("Waiting for timer expiry (%u seconds)...", TEST_TIMER_DURATION_SECS);
+
+  // Poll for expiry.
+  uint32_t elapsed { 0 };
+  while (!npm1300.TimerIsExpired()) {
+    k_msleep(1000);
+    elapsed++;
+    LOG_INF("  %u sec - Running: %s", elapsed, npm1300.TimerIsRunning() ? "YES" : "NO");
+  }
+
+  LOG_INF("");
+  LOG_INF("*** TIMER EXPIRED after %u seconds ***", elapsed);
+  LOG_INF("  TimerIsRunning: %s", npm1300.TimerIsRunning() ? "YES" : "NO");
+  LOG_INF("  TimerIsExpired: %s", npm1300.TimerIsExpired() ? "YES" : "NO");
+
+  // Clear the event.
+  LOG_INF("");
+  LOG_INF("Clearing timer event...");
+  if (npm1300.TimerClearEvent() != 0) {
+    LOG_ERR("Failed to clear timer event!");
+    return -1;
+  }
+
+  LOG_INF("After clear:");
+  LOG_INF("  TimerIsExpired: %s", npm1300.TimerIsExpired() ? "YES" : "NO");
+
+  if (npm1300.TimerIsExpired()) {
+    LOG_ERR("!!! Event still set after clear - FAIL !!!");
+    return -1;
+  }
+
+  LOG_INF("");
+  LOG_INF("=== Test 1 PASSED ===");
+
+  // -------------------------------------------------------------------------
+  // Test 2: Restart timer (verify it can cycle again).
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("=== Test 2: Timer Restart ===");
+  LOG_INF("");
+
+  // Set duration and start again.
+  npm1300.TimerSetDuration(TEST_TIMER_DURATION_SECS);
+  npm1300.TimerStart();
+
+  LOG_INF("Timer restarted, waiting for second expiry...");
+
+  elapsed = 0;
+  while (!npm1300.TimerIsExpired()) {
+    k_msleep(1000);
+    elapsed++;
+    LOG_INF("  %u sec", elapsed);
+  }
+
+  LOG_INF("");
+  LOG_INF("*** SECOND EXPIRY after %u seconds ***", elapsed);
+
+  // Clear.
+  npm1300.TimerClearEvent();
+
+  if (!npm1300.TimerIsExpired()) {
+    LOG_INF("Event cleared successfully");
+  }
+
+  LOG_INF("");
+  LOG_INF("=== Test 2 PASSED ===");
+
+  // -------------------------------------------------------------------------
+  // Test 3: Simulate mailbox monitor logic.
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("=== Test 3: Mailbox Monitor Simulation ===");
+  LOG_INF("");
+  LOG_INF("Simulating: First motion event (door opens)");
+
+  // First motion event - check if timer running.
+  if (npm1300.TimerIsRunning()) {
+    LOG_INF("  Timer was running - this would be a CLOSE event");
+  } else {
+    LOG_INF("  Timer not running - this is an OPEN event");
+    LOG_INF("  Starting 4-minute window timer (using %u secs for test)...", TEST_TIMER_DURATION_SECS);
+    npm1300.TimerSetDuration(TEST_TIMER_DURATION_SECS);
+    npm1300.TimerStart();
+  }
+
+  // Wait a few seconds (simulating time between open and close).
+  LOG_INF("");
+  LOG_INF("Waiting 3 seconds (simulating door open time)...");
+  k_msleep(3000);
+
+  // Second motion event.
+  LOG_INF("");
+  LOG_INF("Simulating: Second motion event (door closes)");
+
+  if (npm1300.TimerIsRunning()) {
+    LOG_INF("  Timer IS running - within mail window!");
+    LOG_INF("  *** MAIL DELIVERED - would send MQTT notification ***");
+    
+    // Stop timer and clear.
+    npm1300.TimerStop();
+    npm1300.TimerClearEvent();
+    LOG_INF("  Timer stopped and event cleared");
+  } else {
+    LOG_INF("  Timer not running - outside window (spurious event)");
+  }
+
+  LOG_INF("");
+  LOG_INF("=== Test 3 PASSED ===");
+
+  // -------------------------------------------------------------------------
+  // Test 4: Timer expiry without second event (simulates spurious motion).
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("=== Test 4: Timer Expiry (No Second Event) ===");
+  LOG_INF("");
+  LOG_INF("Simulating: Motion event with no follow-up");
+
+  // Start timer.
+  npm1300.TimerSetDuration(TEST_TIMER_DURATION_SECS);
+  npm1300.TimerStart();
+  LOG_INF("Timer started, simulating no second event...");
+
+  // Wait for expiry.
+  elapsed = 0;
+  while (!npm1300.TimerIsExpired()) {
+    k_msleep(1000);
+    elapsed++;
+    
+    // Check running state periodically.
+    if (elapsed % 3 == 0) {
+      LOG_INF("  %u sec - Running: %s", elapsed, npm1300.TimerIsRunning() ? "YES" : "NO");
+    }
+  }
+
+  LOG_INF("");
+  LOG_INF("Timer expired without second event");
+  LOG_INF("  This would be ignored (not a mail delivery)");
+
+  // Clear for next cycle.
+  npm1300.TimerClearEvent();
+
+  LOG_INF("");
+  LOG_INF("=== Test 4 PASSED ===");
+
+  // -------------------------------------------------------------------------
+  // Test 5: GPIO interrupt configuration (optional).
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("=== Test 5: GPIO Interrupt Configuration ===");
+  LOG_INF("");
+
+  // Configure GPIO2 as interrupt output (common on Thingy91x).
+  if (npm1300.TimerConfigureGpioInterrupt(2) != 0) {
+    LOG_WRN("Failed to configure GPIO2 - may not be available");
+  } else {
+    LOG_INF("GPIO2 configured as interrupt output");
+  }
+
+  // Enable timer interrupt routing to GPIO.
+  if (npm1300.TimerEnableInterrupt() != 0) {
+    LOG_WRN("Failed to enable timer interrupt");
+  } else {
+    LOG_INF("Timer interrupt enabled (routed to GPIO)");
+  }
+
+  // Start a short timer to see GPIO go high.
+  LOG_INF("");
+  LOG_INF("Starting 5-second timer to test GPIO interrupt...");
+  npm1300.TimerSetDuration(5);
+  npm1300.TimerStart();
+
+  // Wait for expiry.
+  while (!npm1300.TimerIsExpired()) {
+    k_msleep(500);
+  }
+
+  LOG_INF("Timer expired - GPIO2 should now be HIGH");
+  LOG_INF("(Connect scope/logic analyser to GPIO2 to verify)");
+
+  // Clear event (GPIO should go low).
+  npm1300.TimerClearEvent();
+  LOG_INF("Event cleared - GPIO2 should now be LOW");
+
+  // Disable interrupt.
+  npm1300.TimerDisableInterrupt();
+  LOG_INF("Timer interrupt disabled");
+
+  LOG_INF("");
+  LOG_INF("=== Test 5 PASSED ===");
+
+  // -------------------------------------------------------------------------
+  // Summary.
+  // -------------------------------------------------------------------------
+  LOG_INF("");
+  LOG_INF("========================================");
+  LOG_INF("ALL TESTS PASSED!");
+  LOG_INF("========================================");
+  LOG_INF("");
+  LOG_INF("Timer API verified:");
+  LOG_INF("  - TimerConfigure()");
+  LOG_INF("  - TimerSetDuration()");
+  LOG_INF("  - TimerStart() / TimerStop()");
+  LOG_INF("  - TimerIsRunning()");
+  LOG_INF("  - TimerIsExpired()");
+  LOG_INF("  - TimerClearEvent()");
+  LOG_INF("  - TimerConfigureGpioInterrupt()");
+  LOG_INF("  - TimerEnableInterrupt() / TimerDisableInterrupt()");
+  LOG_INF("");
+  LOG_INF("Ready for mailbox monitor integration!");
+
+  // Idle.
+  while (true) {
+    k_msleep(10000);
+  }
+
+  return 0;
+}

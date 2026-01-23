@@ -1,0 +1,18 @@
+/ {
+  aliases {
+    pmic-main = &pmic_main;
+    charger = &npm1300_charger;
+    led0-red = &pwm_led0;
+    led0-green = &pwm_led1;
+    led0-blue = &pwm_led2;
+  };
+};
+
+&pmic_main {
+  status = "okay";
+};
+
+&npm1300_charger {
+  status = "okay";
+};
+
