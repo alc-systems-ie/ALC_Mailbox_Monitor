@@ -432,8 +432,8 @@ namespace alc
   {
     LOG_INF("Connecting to cloud...");
 
-    // Power up modem and connect.
-    if (!m_modem.Connect()) {
+    // Power up modem and connect (with timeout).
+    if (!m_modem.ConnectAsync()) {
       LOG_ERR("Modem connect failed!");
       return false;
     }

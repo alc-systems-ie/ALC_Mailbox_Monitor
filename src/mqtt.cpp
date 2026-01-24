@@ -94,42 +94,63 @@ namespace alc
   bool MqttClient::Connect()
   {
     m_connected = false;
-    
+
     // Resolve broker hostname.
     if (!brokerInit()) {
       LOG_ERR("Broker DNS resolution failed!");
       return false;
     }
-    
+
     // Assign broker to client.
     m_client.broker = &m_broker;
-    
+
     if (m_connect_attempts > 0) {
       k_sleep(K_SECONDS(M_RECONNECT_DELAY_S));
     }
-    
+
     // Set longer timeout for NB-IoT.
     timeval timeout {
       .tv_sec = 60,
       .tv_usec = 0
     };
-    
+
     int result { mqtt_connect(&m_client) };
     if (result) {
       LOG_ERR("MQTT connect failed: %d!", result);
       m_connect_attempts++;
       return false;
     }
-    
+
     // Set socket timeout.
     if (m_client.transport.type == MQTT_TRANSPORT_SECURE) {
       setsockopt(m_client.transport.tls.sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
       setsockopt(m_client.transport.tls.sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     }
-    
+
     fdsInit();
-    
-    LOG_INF("MQTT connect initiated.");
+
+    LOG_INF("MQTT connect initiated, waiting for CONNACK...");
+
+    // Wait for CONNACK - poll and process events until connected or timeout.
+    constexpr int CONNACK_TIMEOUT_MS { 30000 };
+    constexpr int POLL_INTERVAL_MS { 100 };
+    int elapsed { 0 };
+
+    while (!m_connected && elapsed < CONNACK_TIMEOUT_MS) {
+      KeepAlive(POLL_INTERVAL_MS);
+      ProcessEvents();
+      k_msleep(POLL_INTERVAL_MS);
+      elapsed += POLL_INTERVAL_MS;
+    }
+
+    if (!m_connected) {
+      LOG_ERR("CONNACK timeout after %d ms!", CONNACK_TIMEOUT_MS);
+      mqtt_disconnect(&m_client, nullptr);
+      m_connect_attempts++;
+      return false;
+    }
+
+    LOG_INF("MQTT connected after %d ms.", elapsed);
     return true;
   }
 
