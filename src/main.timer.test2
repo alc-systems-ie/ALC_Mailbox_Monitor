@@ -1,0 +1,280 @@
+/**
+ * @file main.cpp
+ * @brief nPM1300 Timer - Use TIMERCONFIG as Running State Proxy
+ * 
+ * Strategy: Since TIMERSTATUS doesn't change, use TIMERCONFIG register
+ * as a proxy for timer state:
+ *   - TIMERCONFIG = 0x00 (BOOTMONITOR) → Timer idle, ready for OPEN
+ *   - TIMERCONFIG = 0x03 (GP_TIMER)    → Timer running, waiting for CLOSE
+ * 
+ * This works because TIMERCONFIG persists across System OFF.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/drivers/mfd/npm13xx.h>
+#include "npm1300.hpp"
+#include "npm1300_const.hpp"
+
+LOG_MODULE_REGISTER(timer_test, LOG_LEVEL_INF);
+
+namespace Cmn = alc::npm1300::common;
+
+class TimerStateProxy
+{
+public:
+  TimerStateProxy(const device* pmic) : m_pmic(pmic) {}
+  
+  // Check if timer is "running" by reading TIMERCONFIG
+  bool isTimerRunning()
+  {
+    uint8_t config { 0 };
+    mfd_npm13xx_reg_read(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERCONFIG_OFFSET, &config);
+    uint8_t mode = config & 0x07;
+    return (mode == 3);  // GP_TIMER mode = running
+  }
+  
+  // Check if timer has expired
+  bool isTimerExpired()
+  {
+    uint8_t eventReg { 0 };
+    mfd_npm13xx_reg_read(m_pmic, Cmn::M_MAIN_BASE, Cmn::M_EVENTSSHPHLDSET_OFFSET, &eventReg);
+    return (eventReg & 0x08) != 0;
+  }
+  
+  // Start timer: Set GP mode, configure duration, strobe, start
+  void startTimer(uint32_t durationSecs)
+  {
+    // 1. Set GP_TIMER mode (this is our "running" flag)
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERCONFIG_OFFSET, 0x03);
+    
+    // 2. Calculate ticks (16ms per tick for slow prescaler)
+    uint32_t ticks = (durationSecs * 1000) / 16;
+    uint8_t hi = (ticks >> 16) & 0xFF;
+    uint8_t mid = (ticks >> 8) & 0xFF;
+    uint8_t lo = ticks & 0xFF;
+    
+    // 3. Write duration
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERHIBYTE_OFFSET, hi);
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERMIDBYTE_OFFSET, mid);
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERLOBYTE_OFFSET, lo);
+    
+    // 4. Strobe to latch settings
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERTARGETSTROBE_OFFSET, 0x01);
+    
+    // 5. Start the timer
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERSET_OFFSET, 0x01);
+    
+    LOG_INF("Timer STARTED: %u seconds (%u ticks), TIMERCONFIG=0x03", durationSecs, ticks);
+  }
+  
+  // Stop timer: Clear timer, set BOOTMONITOR mode (our "idle" flag)
+  void stopTimer()
+  {
+    // 1. Stop the timer
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERCLR_OFFSET, 0x01);
+    
+    // 2. Clear any expired event
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_MAIN_BASE, Cmn::M_EVENTSSHPHLDCLR_OFFSET, 0x08);
+    
+    // 3. Set BOOTMONITOR mode (this is our "idle" flag)
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERCONFIG_OFFSET, 0x00);
+    
+    LOG_INF("Timer STOPPED: TIMERCONFIG=0x00");
+  }
+  
+  // Clear expired event only (keep running state)
+  void clearExpiredEvent()
+  {
+    mfd_npm13xx_reg_write(m_pmic, Cmn::M_MAIN_BASE, Cmn::M_EVENTSSHPHLDCLR_OFFSET, 0x08);
+  }
+  
+  void logState(const char* label)
+  {
+    uint8_t config { 0 };
+    uint8_t eventReg { 0 };
+    
+    mfd_npm13xx_reg_read(m_pmic, Cmn::M_TIMER_BASE, Cmn::M_TIMERCONFIG_OFFSET, &config);
+    mfd_npm13xx_reg_read(m_pmic, Cmn::M_MAIN_BASE, Cmn::M_EVENTSSHPHLDSET_OFFSET, &eventReg);
+    
+    bool running = (config & 0x07) == 3;
+    bool expired = (eventReg & 0x08) != 0;
+    
+    LOG_INF("═══════════════════════════════════════════");
+    LOG_INF("STATE: %s", label);
+    LOG_INF("  TIMERCONFIG: 0x%02X → %s", config, running ? "RUNNING (GP)" : "IDLE (BOOTMON)");
+    LOG_INF("  EXPIRED:     %s", expired ? "YES" : "NO");
+    LOG_INF("═══════════════════════════════════════════");
+  }
+
+private:
+  const device* m_pmic;
+};
+
+// Simulate mailbox logic
+void simulateMailboxLogic(TimerStateProxy& timer)
+{
+  LOG_INF("");
+  LOG_INF("╔═══════════════════════════════════════════╗");
+  LOG_INF("║  SIMULATED MAILBOX LOGIC                  ║");
+  LOG_INF("╚═══════════════════════════════════════════╝");
+  
+  // Check current state (as if we just woke up)
+  bool timerRunning = timer.isTimerRunning();
+  bool timerExpired = timer.isTimerExpired();
+  
+  LOG_INF("");
+  LOG_INF("Motion wake detected!");
+  LOG_INF("  Timer running: %s", timerRunning ? "YES" : "NO");
+  LOG_INF("  Timer expired: %s", timerExpired ? "YES" : "NO");
+  
+  if (timerExpired) {
+    LOG_INF("→ Timer expired (false alarm or window timeout)");
+    LOG_INF("  Clearing expired event, resetting to idle");
+    timer.stopTimer();
+  }
+  else if (!timerRunning) {
+    LOG_INF("→ OPEN EVENT detected!");
+    LOG_INF("  Starting mail window timer...");
+    timer.startTimer(5);  // 5 second window for testing
+  }
+  else {
+    LOG_INF("→ CLOSE EVENT detected - MAIL DELIVERED!");
+    LOG_INF("  Stopping timer, would send MQTT here...");
+    timer.stopTimer();
+  }
+  
+  timer.logState("After handling motion");
+}
+
+int main()
+{
+  LOG_INF("═══════════════════════════════════════════");
+  LOG_INF("  TIMERCONFIG AS STATE PROXY TEST");
+  LOG_INF("═══════════════════════════════════════════");
+  LOG_INF("");
+  
+  const device* pmic_dev { DEVICE_DT_GET(DT_NODELABEL(pmic_main)) };
+  const device* charger_dev { DEVICE_DT_GET(DT_NODELABEL(npm1300_charger)) };
+  
+  if (!device_is_ready(pmic_dev) || !device_is_ready(charger_dev)) {
+    LOG_ERR("PMIC devices not ready!");
+    return -1;
+  }
+  
+  alc::Npm1300 pmic { pmic_dev, charger_dev };
+  if (pmic.Init() != 0) {
+    LOG_ERR("nPM1300 init failed!");
+    return -1;
+  }
+  LOG_INF("nPM1300 initialized.");
+  
+  TimerStateProxy timer { pmic_dev };
+  
+  // ═══════════════════════════════════════════════════════════════
+  // TEST 1: Verify TIMERCONFIG can be used as state flag
+  // ═══════════════════════════════════════════════════════════════
+  LOG_INF("");
+  LOG_INF("╔═══════════════════════════════════════════╗");
+  LOG_INF("║  TEST 1: TIMERCONFIG STATE PERSISTENCE    ║");
+  LOG_INF("╚═══════════════════════════════════════════╝");
+  
+  // Set to idle (BOOTMONITOR)
+  timer.stopTimer();
+  timer.logState("Set to IDLE (BOOTMONITOR)");
+  LOG_INF("isTimerRunning() = %s", timer.isTimerRunning() ? "TRUE" : "FALSE");
+  
+  // Set to running (GP_TIMER)
+  timer.startTimer(10);
+  timer.logState("Set to RUNNING (GP_TIMER)");
+  LOG_INF("isTimerRunning() = %s", timer.isTimerRunning() ? "TRUE" : "FALSE");
+  
+  // Back to idle
+  timer.stopTimer();
+  timer.logState("Back to IDLE (BOOTMONITOR)");
+  LOG_INF("isTimerRunning() = %s", timer.isTimerRunning() ? "TRUE" : "FALSE");
+  
+  // ═══════════════════════════════════════════════════════════════
+  // TEST 2: Full mailbox sequence simulation
+  // ═══════════════════════════════════════════════════════════════
+  LOG_INF("");
+  LOG_INF("╔═══════════════════════════════════════════╗");
+  LOG_INF("║  TEST 2: FULL MAILBOX SEQUENCE            ║");
+  LOG_INF("╚═══════════════════════════════════════════╝");
+  
+  // Ensure clean state
+  timer.stopTimer();
+  timer.logState("Initial state (fresh boot)");
+  
+  // Simulate first motion (OPEN)
+  LOG_INF("");
+  LOG_INF("────── SIMULATING MOTION 1 (OPEN) ──────");
+  simulateMailboxLogic(timer);
+  
+  // Wait a bit (simulating time passing)
+  LOG_INF("");
+  LOG_INF("Waiting 2 seconds (mail being delivered)...");
+  k_msleep(2000);
+  
+  // Simulate second motion (CLOSE)
+  LOG_INF("");
+  LOG_INF("────── SIMULATING MOTION 2 (CLOSE) ──────");
+  simulateMailboxLogic(timer);
+  
+  // ═══════════════════════════════════════════════════════════════
+  // TEST 3: Timer expiry scenario
+  // ═══════════════════════════════════════════════════════════════
+  LOG_INF("");
+  LOG_INF("╔═══════════════════════════════════════════╗");
+  LOG_INF("║  TEST 3: TIMER EXPIRY SCENARIO            ║");
+  LOG_INF("╚═══════════════════════════════════════════╝");
+  
+  // Start with clean state
+  timer.stopTimer();
+  
+  // Simulate OPEN event
+  LOG_INF("");
+  LOG_INF("────── SIMULATING OPEN (no close) ──────");
+  simulateMailboxLogic(timer);
+  
+  // Wait for timer to expire (5 seconds + buffer)
+  LOG_INF("");
+  LOG_INF("Waiting 6 seconds for timer expiry...");
+  k_msleep(6000);
+  
+  // Check state after expiry
+  timer.logState("After timer expiry");
+  LOG_INF("isTimerRunning() = %s", timer.isTimerRunning() ? "TRUE" : "FALSE");
+  LOG_INF("isTimerExpired() = %s", timer.isTimerExpired() ? "TRUE" : "FALSE");
+  
+  // Simulate motion after expiry (should reset)
+  LOG_INF("");
+  LOG_INF("────── SIMULATING MOTION AFTER EXPIRY ──────");
+  simulateMailboxLogic(timer);
+  
+  // ═══════════════════════════════════════════════════════════════
+  // SUMMARY
+  // ═══════════════════════════════════════════════════════════════
+  LOG_INF("");
+  LOG_INF("╔═══════════════════════════════════════════╗");
+  LOG_INF("║              TEST COMPLETE                ║");
+  LOG_INF("╚═══════════════════════════════════════════╝");
+  LOG_INF("");
+  LOG_INF("STRATEGY SUMMARY:");
+  LOG_INF("  - Use TIMERCONFIG as state proxy");
+  LOG_INF("  - TIMERCONFIG=0x00 (BOOTMON) → IDLE");
+  LOG_INF("  - TIMERCONFIG=0x03 (GP)      → RUNNING");
+  LOG_INF("  - EVENTSSHPHLDSET Bit3       → EXPIRED");
+  LOG_INF("");
+  LOG_INF("MAILBOX LOGIC:");
+  LOG_INF("  Motion wake + IDLE    → OPEN: start timer");
+  LOG_INF("  Motion wake + RUNNING → CLOSE: send MQTT");
+  LOG_INF("  Motion wake + EXPIRED → Reset, treat as OPEN");
+  
+  while (true) {
+    k_sleep(K_FOREVER);
+  }
+  
+  return 0;
+}
+

@@ -38,17 +38,17 @@ namespace alc
   bool App::Init()
   {
     LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║     ALC MAILBOX MONITOR v0.2.0         ║");
-    LOG_INF("║     (nPM1300 Timer Edition)            ║");
+    LOG_INF("║     ALC MAILBOX MONITOR v0.3.0         ║");
+    LOG_INF("║     (Simplified Timer Logic)           ║");
     LOG_INF("╚════════════════════════════════════════╝");
     LOG_INF("Device ID: %s", M_DEVICE_ID);
     
     // Log reset reason.
-    logResetReason();
+    // logResetReason();
     
     // Increment boot counter.
-    m_boot_count++;
-    LOG_INF("Boot count: %u", m_boot_count);
+    // m_boot_count++;
+    // LOG_INF("Boot count: %u", m_boot_count);
     
     // Initialise LED.
     if (!m_led.Init()) {
@@ -79,12 +79,12 @@ namespace alc
     LOG_INF("nPM1300 PMIC initialised.");
     
     // Configure the mail window timer (one-time setup).
-    int result = configureMailWindowTimer();
-    if (result < 0) {
-      LOG_ERR("Mail window timer configuration failed: %d!", result);
-      return false;
-    }
-    LOG_INF("Mail window timer configured.");
+    // int result = configureMailWindowTimer();
+    // if (result < 0) {
+    //   LOG_ERR("Mail window timer configuration failed: %d!", result);
+    //   return false;
+    // }
+    // LOG_INF("Mail window timer configured.");
     
     // Initialise modem.
     if (!m_modem.Init()) {
@@ -94,7 +94,7 @@ namespace alc
     LOG_INF("Modem initialised.");
     
     // Initialise ADXL367.
-    result = m_motion.Init();
+    int result = m_motion.Init();
     if (result < 0) {
       LOG_ERR("ADXL367 init failed: %d!", result);
       return false;
@@ -191,14 +191,14 @@ namespace alc
     // Check accelerometer latch (P0.11).
     if (nrf_gpio_pin_latch_get(PIN_ACCEL_INT)) {
       LOG_INF("  Accelerometer latch SET (P0.%d)", PIN_ACCEL_INT);
-      nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
+      // nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
       return WakeSource::Accelerometer;
     }
     
     // Check PMIC/Timer latch (P0.02) - future.
     if (nrf_gpio_pin_latch_get(PIN_PMIC_INT)) {
       LOG_INF("  PMIC/Timer latch SET (P0.%d)", PIN_PMIC_INT);
-      nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
+      // nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
       return WakeSource::Timer;
     }
     
@@ -230,45 +230,72 @@ namespace alc
     m_led.SetColour(LedColours::AMBER);
     
     // =========================================================================
-    // Core Logic: Check nPM1300 timer state to determine event type
+    // Core Logic: Use ONLY TimerIsExpired() to determine event type
     // =========================================================================
     //
-    // Timer NOT running → This is an OPEN event (first motion)
-    //   → Start the mail window timer
-    //   → Return to sleep
+    // This approach relies on the timer expired event flag (EVENTSSHPHLDSET Bit3)
+    // which persists across System OFF and reliably indicates timer state:
     //
-    // Timer IS running → This is a CLOSE event (second motion within window)
-    //   → Stop and clear the timer
-    //   → Send MQTT notification
-    //   → Return to sleep
+    //   Expired = TRUE  → Timer has expired (or never started)
+    //                   → This is an OPEN event (or timeout/spurious)
+    //                   → Clear the flag, start mail window timer
     //
+    //   Expired = FALSE → Timer is still running
+    //                   → This is a CLOSE event (second motion within window)
+    //                   → Send MQTT notification, leave timer running
+    //
+    // State transitions:
+    //   Fresh boot: Run short timer, wait for expiry → Expired=TRUE (ready)
+    //   OPEN event: Clear expired flag, start timer → Expired=FALSE (waiting)
+    //   CLOSE event: Send MQTT, timer keeps running → Expired=FALSE
+    //   Timer expires naturally: → Expired=TRUE (ready for next cycle)
+    //
+    // Edge case: If mailbox opened twice within window, both trigger CLOSE
+    // events. Server-side deduplication handles this.
+    // =========================================================================
     
-    bool timerWasRunning = m_pmic.TimerIsRunning();
     bool timerExpired = m_pmic.TimerIsExpired();
     
     LOG_INF("────────────────────────────────────────");
     LOG_INF("TIMER STATE:");
-    LOG_INF("  Timer running: %s", timerWasRunning ? "YES" : "NO");
-    LOG_INF("  Timer expired: %s", timerExpired ? "YES" : "NO");
+    LOG_INF("  Timer expired: %s", timerExpired ? "YES (ready for OPEN)" : "NO (waiting for CLOSE)");
     LOG_INF("  Mail window:   %u seconds", m_config.mailWindowSecs);
     LOG_INF("────────────────────────────────────────");
     
-    // Clear any expired event (housekeeping).
     if (timerExpired) {
-      LOG_INF("Clearing stale timer expired event.");
+      // ===== OPEN EVENT (or timeout/spurious) =====
+      LOG_INF("╔════════════════════════════════════════╗");
+      LOG_INF("║  OPEN EVENT - STARTING TIMER           ║");
+      LOG_INF("╚════════════════════════════════════════╝");
+      
+      // Clear the expired flag first.
       m_pmic.TimerClearEvent();
-    }
-    
-    if (timerWasRunning) {
+      
+      // Set duration and start the timer.
+      int result = m_pmic.TimerSetDuration(m_config.mailWindowSecs);
+      if (result < 0) {
+        LOG_ERR("Failed to set timer duration: %d", result);
+      }
+      
+      result = m_pmic.TimerStart();
+      if (result < 0) {
+        LOG_ERR("Failed to start timer: %d", result);
+      } else {
+        LOG_INF("Timer started: %u second window.", m_config.mailWindowSecs);
+      }
+      
+      // No network activity needed for open event.
+      LOG_INF("Open event recorded. Waiting for close event...");
+      
+    } else {
       // ===== CLOSE EVENT - MAIL DELIVERED =====
       LOG_INF("╔════════════════════════════════════════╗");
       LOG_INF("║  CLOSE EVENT - MAIL DELIVERED!         ║");
       LOG_INF("╚════════════════════════════════════════╝");
       
-      // Stop and clear the timer.
-      m_pmic.TimerStop();
-      m_pmic.TimerClearEvent();
-      LOG_INF("Timer stopped and cleared.");
+      // Don't touch the timer - let it expire naturally.
+      // This resets the state to "ready for OPEN" automatically.
+      LOG_INF("Timer left running - will expire and reset state.");
       
       // LED indication - green for mail delivery.
       m_led.SetColour(LedColours::GREEN);
@@ -297,31 +324,6 @@ namespace alc
         m_led.SetColour(LedColours::RED);
         k_msleep(500);
       }
-      
-    } else {
-      // ===== OPEN EVENT - START TIMER =====
-      LOG_INF("╔════════════════════════════════════════╗");
-      LOG_INF("║  OPEN EVENT - STARTING TIMER           ║");
-      LOG_INF("╚════════════════════════════════════════╝");
-      
-      // Clear any stale events first.
-      m_pmic.TimerClearEvent();
-      
-      // Set duration and start the timer.
-      int result = m_pmic.TimerSetDuration(m_config.mailWindowSecs);
-      if (result < 0) {
-        LOG_ERR("Failed to set timer duration: %d", result);
-      }
-      
-      result = m_pmic.TimerStart();
-      if (result < 0) {
-        LOG_ERR("Failed to start timer: %d", result);
-      } else {
-        LOG_INF("Timer started: %u second window.", m_config.mailWindowSecs);
-      }
-      
-      // No network activity needed for open event.
-      LOG_INF("Open event recorded. Waiting for close event...");
     }
     
     // Turn off LED.
@@ -395,25 +397,68 @@ namespace alc
     k_msleep(500);
     m_led.SetColour(LedColours::OFF);
     
-    // On fresh boot, clear any stale timer state.
-    LOG_INF("Clearing any stale timer state...");
+    // =========================================================================
+    // Initialise timer state: Run short timer and wait for expiry
+    // =========================================================================
+    //
+    // This establishes the "ready for OPEN" state by ensuring TimerIsExpired()
+    // returns TRUE after fresh boot. The expired flag persists across System OFF.
+    //
+    // Cost: One-time 3-second blocking wait on fresh boot only.
+    // =========================================================================
+    
+    constexpr uint32_t INIT_TIMER_SECS { 3 };
+    constexpr uint32_t POLL_INTERVAL_MS { 100 };
+    constexpr uint32_t TIMEOUT_MS { 5000 };  // Safety timeout.
+    
+    LOG_INF("Initialising timer state (one-time %u second wait)...", INIT_TIMER_SECS);
+    
+    // Clear any stale state.
     m_pmic.TimerStop();
     m_pmic.TimerClearEvent();
     
-    // Send a startup notification.
-    LOG_INF("Sending startup notification...");
-    
-    if (connectToCloud()) {
-      // Send startup/heartbeat.
-      sendHeartbeat();
-      sendBatteryStatus();
-      collectMqttCommands();
-      disconnectFromCloud();
-    } else {
-      LOG_WRN("Failed to connect on fresh boot. Will try on next wake.");
+    // Start short initialisation timer.
+    int result = m_pmic.TimerSetDuration(INIT_TIMER_SECS);
+    if (result < 0) {
+      LOG_ERR("Failed to set init timer duration: %d", result);
     }
     
-    LOG_INF("Fresh boot handling complete.");
+    result = m_pmic.TimerStart();
+    if (result < 0) {
+      LOG_ERR("Failed to start init timer: %d", result);
+    }
+    
+    // Wait for timer to expire.
+    uint32_t elapsed { 0 };
+    while (!m_pmic.TimerIsExpired() && (elapsed < TIMEOUT_MS)) {
+      k_msleep(POLL_INTERVAL_MS);
+      elapsed += POLL_INTERVAL_MS;
+    }
+    
+    if (m_pmic.TimerIsExpired()) {
+      LOG_INF("Init timer expired - state ready (Expired=TRUE).");
+      // IMPORTANT: Do NOT clear the expired flag!
+      // Leaving it SET means TimerIsExpired() returns TRUE = ready for OPEN.
+    } else {
+      LOG_ERR("Init timer did not expire within timeout!");
+      // Force the expired state by clearing and leaving.
+      m_pmic.TimerStop();
+    }
+    
+    // // Send a startup notification.
+    // LOG_INF("Sending startup notification...");
+    // 
+    // if (connectToCloud()) {
+    //   // Send startup/heartbeat.
+    //   sendHeartbeat();
+    //   sendBatteryStatus();
+    //   collectMqttCommands();
+    //   disconnectFromCloud();
+    // } else {
+    //   LOG_WRN("Failed to connect on fresh boot. Will try on next wake.");
+    // }
+    // 
+    // LOG_INF("Fresh boot handling complete.");
   }
 
   // ========== Timer Configuration ==========
@@ -446,37 +491,20 @@ namespace alc
   {
     LOG_INF("Connecting to cloud...");
     
-    // LED indication.
-    m_led.SetColour(LedColours::BLUE);
-    
-    // Connect modem.
+    // Power up modem and connect.
     if (!m_modem.Connect()) {
-      LOG_ERR("Modem connection failed!");
+      LOG_ERR("Modem connect failed!");
       return false;
     }
-    LOG_INF("Modem connected.");
     
     // Connect MQTT.
-    size_t retries { 0 };
-    while (!m_mqtt.IsConnected() && retries < M_MQTT_CONNECTION_RETRIES) {
-      m_mqtt.Connect();
-      m_mqtt.ProcessEvents();
-      k_msleep(100);
-      retries++;
-    }
-    
-    if (!m_mqtt.IsConnected()) {
-      LOG_ERR("MQTT connection failed after %d retries!", retries);
+    if (!m_mqtt.Connect()) {
+      LOG_ERR("MQTT connect failed!");
+      m_modem.Disconnect();
       return false;
     }
     
-    LOG_INF("MQTT connected.");
-    
-    // Subscribe to commands topic.
-    char topic[M_MQTT_TOPIC_LENGTH];
-    buildTopic(topic, sizeof(topic), M_SUFFIX_COMMANDS);
-    m_mqtt.Subscribe(topic);
-    
+    LOG_INF("Cloud connection established.");
     return true;
   }
 
@@ -490,54 +518,18 @@ namespace alc
     LOG_INF("Disconnected.");
   }
 
-  bool App::sendMailDeliveredEvent(bool ownerIntervened)
-  {
-    char message[M_MQTT_MESSAGE_LENGTH];
-    char topic[M_MQTT_TOPIC_LENGTH];
-    
-    // Read battery data from PMIC.
-    Npm1300::SensorData sensorData;
-    m_pmic.ReadSensors(sensorData);
-    
-    int len { snprintf(message, sizeof(message),
-                       "{\"event\":\"mailbox_visited\","
-                       "\"owner_intervened\":%s,"
-                       "\"boot_count\":%u,"
-                       "\"battery_v\":%.2f}",
-                       ownerIntervened ? "true" : "false",
-                       m_boot_count,
-                       static_cast<double>(sensorData.voltage)) };
-    
-    buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
-    
-    LOG_INF("Sending mail event: %s", message);
-    
-    if (!m_mqtt.Publish(topic, message, len, false)) {
-      LOG_ERR("Failed to publish mail event!");
-      return false;
-    }
-    
-    return true;
-  }
-
   bool App::sendHeartbeat()
   {
-    char message[M_MQTT_MESSAGE_LENGTH];
-    char topic[M_MQTT_TOPIC_LENGTH];
-    
-    // Check timer state for diagnostic info.
-    bool timerRunning = m_pmic.TimerIsRunning();
+    char topic[64];
+    char message[128];
     
     int len { snprintf(message, sizeof(message),
                        "{\"event\":\"heartbeat\","
                        "\"boot_count\":%u,"
-                       "\"mail_window_secs\":%u,"
-                       "\"timer_running\":%s}",
-                       m_boot_count,
-                       m_config.mailWindowSecs,
-                       timerRunning ? "true" : "false") };
+                       "\"mail_window_secs\":%u}",
+                       m_boot_count, m_config.mailWindowSecs) };
     
-    buildTopic(topic, sizeof(topic), M_SUFFIX_STATUS);
+    buildTopic(topic, sizeof(topic), M_SUFFIX_HEARTBEAT);
     
     LOG_INF("Sending heartbeat: %s", message);
     
@@ -549,10 +541,32 @@ namespace alc
     return true;
   }
 
+  bool App::sendMailDeliveredEvent(bool ownerIntervened)
+  {
+    char topic[64];
+    char message[128];
+    
+    int len { snprintf(message, sizeof(message),
+                       "{\"event\":\"mail_delivered\","
+                       "\"owner_intervened\":%s}",
+                       ownerIntervened ? "true" : "false") };
+    
+    buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
+    
+    LOG_INF("Sending mail delivered event: %s", message);
+    
+    if (!m_mqtt.Publish(topic, message, len, false)) {
+      LOG_ERR("Failed to publish mail event!");
+      return false;
+    }
+    
+    return true;
+  }
+
   bool App::sendBatteryStatus()
   {
-    char message[M_MQTT_MESSAGE_LENGTH];
-    char topic[M_MQTT_TOPIC_LENGTH];
+    char topic[64];
+    char message[256];
     
     // Read actual battery values from nPM1300.
     Npm1300::SensorData sensorData;

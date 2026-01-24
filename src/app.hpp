@@ -228,6 +228,7 @@ namespace alc
       static constexpr const char* M_SUFFIX_EVENTS { "events" };
       static constexpr const char* M_SUFFIX_STATUS { "status" };
       static constexpr const char* M_SUFFIX_BATTERY { "battery" };
+      static constexpr const char* M_SUFFIX_HEARTBEAT { "heartbeat" };
       static constexpr const char* M_SUFFIX_COMMANDS { "commands" };
 
       // GPIO pins for wake sources.

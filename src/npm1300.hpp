@@ -208,14 +208,26 @@ namespace alc
       // This is ideal for mailbox monitor timing where we need to detect if two
       // motion events occur within a time window (e.g., 4 minutes).
       //
+      // ╔═══════════════════════════════════════════════════════════════════════╗
+      // ║  NOTE: TIMERSTATUS Register Limitation                                ║
+      // ║                                                                       ║
+      // ║  The TIMERSTATUS register does not reliably indicate running state.   ║
+      // ║  Use TimerIsExpired() instead for reliable state detection:           ║
+      // ║                                                                       ║
+      // ║    TimerIsExpired() = TRUE  → Timer expired or never started          ║
+      // ║    TimerIsExpired() = FALSE → Timer is running                        ║
+      // ║                                                                       ║
+      // ║  The expired event flag (EVENTSSHPHLDSET Bit3) persists across        ║
+      // ║  System OFF and reliably indicates timer state.                       ║
+      // ╚═══════════════════════════════════════════════════════════════════════╝
+      //
       // Typical usage:
       //   1. TimerConfigure() - Set mode and prescaler (once at init)
       //   2. TimerSetDuration() - Set countdown duration
       //   3. TimerStart() - Begin countdown
-      //   4. TimerIsRunning() - Check if timer is active
-      //   5. TimerIsExpired() - Check if timer has fired
-      //   6. TimerClearEvent() - Acknowledge the event
-      //   7. TimerStop() - Halt the timer if needed
+      //   4. TimerIsExpired() - Check if timer has fired (RECOMMENDED)
+      //   5. TimerClearEvent() - Acknowledge the event
+      //   6. TimerStop() - Halt the timer if needed
       //
 
       /**
@@ -268,17 +280,28 @@ namespace alc
        * 
        * Reads TIMERSTATUS register to determine timer state.
        * 
-       * @return True if timer is running, false otherwise.
+       * @warning UNRELIABLE: TIMERSTATUS does not reliably indicate running state.
+       *          Use TimerIsExpired() instead for reliable state detection:
+       *          - TimerIsExpired() = FALSE means timer is running
+       *          - TimerIsExpired() = TRUE means timer has expired or was never started
+       * 
+       * @return True if timer appears to be running, false otherwise.
        */
       bool TimerIsRunning();
 
       /**
-       * @brief Check if the timer has expired.
+       * @brief Check if the timer has expired. (RECOMMENDED for state detection)
        * 
        * Reads EVENTSSHPHLDSET register bit 3 (EVENTWATCHDOGWARN).
        * This bit is set when the GP Timer countdown reaches zero.
        * 
-       * @return True if timer has expired, false otherwise.
+       * This is the RECOMMENDED method for detecting timer state:
+       *   - Returns TRUE if timer has expired or was never started
+       *   - Returns FALSE if timer is currently running
+       * 
+       * The expired flag persists across System OFF.
+       * 
+       * @return True if timer has expired, false if still running.
        */
       bool TimerIsExpired();
 

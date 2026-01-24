@@ -1,4 +1,4 @@
-/**
+/*
  * @file main.cpp
  * @brief ALC Mailbox Monitor - Main Entry Point.
  * 

@@ -297,6 +297,8 @@ namespace alc {
 
   bool Npm1300::TimerIsRunning()
   {
+    // WARNING: TIMERSTATUS does not reliably indicate running state.
+    // Use TimerIsExpired() instead for reliable state detection.
     uint8_t status { 0 };
     int result = readRegister(Cmn::M_TIMER_BASE, Cmn::M_TIMERSTATUS_OFFSET, status);
     if (result < 0) {
@@ -304,9 +306,9 @@ namespace alc {
       return false;
     }
 
-    // Bit 1 indicates timer is running.
+    // Bit 1 indicates timer is running (UNRELIABLE - always seems to be 1).
     bool running = (status & Cmn::M_BIT_1_MASK) != 0;
-    LOG_DBG("Timer status: 0x%02X, running=%d", status, running);
+    LOG_DBG("Timer status: 0x%02X, running=%d (UNRELIABLE)", status, running);
 
     return running;
   }
