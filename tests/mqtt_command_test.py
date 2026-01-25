@@ -29,8 +29,8 @@ except ImportError:
 # MQTT Broker Configuration
 BROKER_HOST = "e40e8a66d54d495c86d6336e20375793.s1.eu.hivemq.cloud"
 BROKER_PORT = 8883
-USERNAME = "alc-mailbox"
-PASSWORD = "your-password-here"  # Replace with actual password
+USERNAME = "alcsystems"
+PASSWORD = "#bErtie2017"  # Replace with actual password
 
 # Default device ID (from app.hpp)
 DEFAULT_DEVICE_ID = "ccccddddeeeeffff0000111122221111"
