@@ -45,6 +45,12 @@ namespace alc
   constexpr uint32_t M_MAIL_WINDOW_SECS { 240 };        // 4 minutes - defines open/close cycle.
   constexpr uint32_t M_HEARTBEAT_HOUR { 3 };            // 3am for nightly heartbeat.
 
+  // ADXL367 defaults (configurable via MQTT).
+  constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 250 };   // Activity threshold in mg.
+  constexpr uint8_t M_ACTIVITY_TIME { 1 };              // Activity time in samples.
+  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 1200 };// Inactivity threshold in mg.
+  constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
+
   // MQTT settings.
   constexpr size_t M_MQTT_MESSAGE_LENGTH { 256 };
   constexpr size_t M_MQTT_TOPIC_LENGTH { 128 };
@@ -73,6 +79,11 @@ namespace alc
 
   enum class MqttCommand {
     SET_MAIL_WINDOW,
+    SET_ACTIVITY_THRESHOLD,
+    SET_ACTIVITY_TIME,
+    SET_INACTIVITY_THRESHOLD,
+    SET_INACTIVITY_TIME,
+    RESET_CONFIG,
     REQUEST_STATUS,
     FIRMWARE_UPDATE,
     UNKNOWN
@@ -81,10 +92,21 @@ namespace alc
   // ========== Runtime Configuration ==========
 
   struct MailboxConfig {
+    // Timer settings.
     uint32_t mailWindowSecs;
+
+    // ADXL367 activity/inactivity settings.
+    uint16_t activityThresholdMg;
+    uint8_t activityTime;
+    uint16_t inactivityThresholdMg;
+    uint8_t inactivityTime;
 
     void setDefaults() {
       mailWindowSecs = M_MAIL_WINDOW_SECS;
+      activityThresholdMg = M_ACTIVITY_THRESHOLD_MG;
+      activityTime = M_ACTIVITY_TIME;
+      inactivityThresholdMg = M_INACTIVITY_THRESHOLD_MG;
+      inactivityTime = M_INACTIVITY_TIME;
     }
   };
 
@@ -172,6 +194,11 @@ namespace alc
        * @brief Send battery status.
        */
       bool sendBatteryStatus();
+
+      /**
+       * @brief Send current configuration status.
+       */
+      bool sendConfigStatus();
 
       /**
        * @brief Collect any pending MQTT commands.

@@ -549,6 +549,35 @@ namespace alc
     return true;
   }
 
+  bool App::sendConfigStatus()
+  {
+    char topic[64];
+    char message[256];
+
+    int len { snprintf(message, sizeof(message),
+                       "{\"mail_window\":%u,"
+                       "\"activity_threshold\":%u,"
+                       "\"activity_time\":%u,"
+                       "\"inactivity_threshold\":%u,"
+                       "\"inactivity_time\":%u}",
+                       m_config.mailWindowSecs,
+                       m_config.activityThresholdMg,
+                       m_config.activityTime,
+                       m_config.inactivityThresholdMg,
+                       m_config.inactivityTime) };
+
+    buildTopic(topic, sizeof(topic), M_SUFFIX_STATUS);
+
+    LOG_INF("Sending config status: %s", message);
+
+    if (!m_mqtt.Publish(topic, message, len, false)) {
+      LOG_ERR("Failed to publish config status!");
+      return false;
+    }
+
+    return true;
+  }
+
   void App::collectMqttCommands()
   {
     LOG_INF("Collecting MQTT commands...");
@@ -572,6 +601,16 @@ namespace alc
   void App::OnMqttConnected()
   {
     LOG_INF("MQTT connected callback.");
+
+    // Subscribe to commands topic.
+    char topic[64];
+    buildTopic(topic, sizeof(topic), M_SUFFIX_COMMANDS);
+    int result = m_mqtt.Subscribe(topic);
+    if (result < 0) {
+      LOG_ERR("Failed to subscribe to commands topic: %d", result);
+    } else {
+      LOG_INF("Subscribed to: %s", topic);
+    }
   }
 
   void App::OnMqttDisconnected()
@@ -591,9 +630,31 @@ namespace alc
 
   MqttCommand App::parseCommand(const char* message, size_t length)
   {
+    // Check for reset first (takes priority).
+    if (strstr(message, "\"reset_config\"")) {
+      return MqttCommand::RESET_CONFIG;
+    }
+
+    // Timer configuration.
     if (strstr(message, "\"mail_window\"")) {
       return MqttCommand::SET_MAIL_WINDOW;
     }
+
+    // ADXL367 configuration.
+    if (strstr(message, "\"activity_threshold\"")) {
+      return MqttCommand::SET_ACTIVITY_THRESHOLD;
+    }
+    if (strstr(message, "\"activity_time\"")) {
+      return MqttCommand::SET_ACTIVITY_TIME;
+    }
+    if (strstr(message, "\"inactivity_threshold\"")) {
+      return MqttCommand::SET_INACTIVITY_THRESHOLD;
+    }
+    if (strstr(message, "\"inactivity_time\"")) {
+      return MqttCommand::SET_INACTIVITY_TIME;
+    }
+
+    // Other commands.
     if (strstr(message, "\"status_request\"")) {
       return MqttCommand::REQUEST_STATUS;
     }
@@ -607,18 +668,75 @@ namespace alc
   void App::executeCommand(MqttCommand cmd, const char* message, size_t length)
   {
     int value;
+    bool configChanged { false };
 
     switch (cmd) {
+      case MqttCommand::RESET_CONFIG:
+        LOG_INF("Resetting configuration to defaults...");
+        m_config.setDefaults();
+        configChanged = true;
+        LOG_INF("Configuration reset: mail_window=%u, act_thresh=%u, act_time=%u, inact_thresh=%u, inact_time=%u",
+                m_config.mailWindowSecs, m_config.activityThresholdMg, m_config.activityTime,
+                m_config.inactivityThresholdMg, m_config.inactivityTime);
+        break;
+
       case MqttCommand::SET_MAIL_WINDOW:
         value = extractIntValue(message, "mail_window");
-        if (value > 0) {
+        if (value > 0 && value <= 86400) {  // Max 24 hours.
           m_config.mailWindowSecs = static_cast<uint32_t>(value);
           LOG_INF("Mail window set to %d seconds.", value);
+        } else {
+          LOG_WRN("Invalid mail_window value: %d (must be 1-86400).", value);
+        }
+        break;
+
+      case MqttCommand::SET_ACTIVITY_THRESHOLD:
+        value = extractIntValue(message, "activity_threshold");
+        if (value > 0 && value <= 8000) {  // Max 8g in mg.
+          m_config.activityThresholdMg = static_cast<uint16_t>(value);
+          configChanged = true;
+          LOG_INF("Activity threshold set to %d mg.", value);
+        } else {
+          LOG_WRN("Invalid activity_threshold value: %d (must be 1-8000 mg).", value);
+        }
+        break;
+
+      case MqttCommand::SET_ACTIVITY_TIME:
+        value = extractIntValue(message, "activity_time");
+        if (value > 0 && value <= 255) {
+          m_config.activityTime = static_cast<uint8_t>(value);
+          configChanged = true;
+          LOG_INF("Activity time set to %d samples.", value);
+        } else {
+          LOG_WRN("Invalid activity_time value: %d (must be 1-255).", value);
+        }
+        break;
+
+      case MqttCommand::SET_INACTIVITY_THRESHOLD:
+        value = extractIntValue(message, "inactivity_threshold");
+        if (value > 0 && value <= 8000) {  // Max 8g in mg.
+          m_config.inactivityThresholdMg = static_cast<uint16_t>(value);
+          configChanged = true;
+          LOG_INF("Inactivity threshold set to %d mg.", value);
+        } else {
+          LOG_WRN("Invalid inactivity_threshold value: %d (must be 1-8000 mg).", value);
+        }
+        break;
+
+      case MqttCommand::SET_INACTIVITY_TIME:
+        value = extractIntValue(message, "inactivity_time");
+        if (value > 0 && value <= 255) {
+          m_config.inactivityTime = static_cast<uint8_t>(value);
+          configChanged = true;
+          LOG_INF("Inactivity time set to %d samples.", value);
+        } else {
+          LOG_WRN("Invalid inactivity_time value: %d (must be 1-255).", value);
         }
         break;
 
       case MqttCommand::REQUEST_STATUS:
-        LOG_INF("Status request received - will send on next connection.");
+        LOG_INF("Status request received.");
+        sendConfigStatus();
         break;
 
       case MqttCommand::FIRMWARE_UPDATE:
@@ -628,6 +746,17 @@ namespace alc
       default:
         LOG_WRN("Unknown command received.");
         break;
+    }
+
+    // Reconfigure ADXL367 if parameters changed.
+    if (configChanged) {
+      LOG_INF("Reconfiguring ADXL367 with new parameters...");
+      int result = configureMotionSensor();
+      if (result < 0) {
+        LOG_ERR("Failed to reconfigure ADXL367: %d", result);
+      } else {
+        LOG_INF("ADXL367 reconfigured successfully.");
+      }
     }
   }
 
@@ -657,16 +786,20 @@ namespace alc
     result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Standby);
     if (result < 0) { return result; }
 
-    // Configure activity detection.
+    // Configure activity detection using current config values.
     Adxl367::ActivityConfig actConfig {
       .activityMode = Adxl367::ActivityMode::Referenced,
       .inactivityMode = Adxl367::ActivityMode::Absolute,
       .linkLoop = Adxl367::LinkLoopMode::Loop,
-      .activityThreshold = 250,     // 250mg - detect lid movement.
-      .activityTime = 1,            // 1 sample.
-      .inactivityThreshold = 1200,  // 1.2g - above gravity for absolute mode.
-      .inactivityTime = 10          // ~1.6s at 6 SPS.
+      .activityThreshold = m_config.activityThresholdMg,
+      .activityTime = m_config.activityTime,
+      .inactivityThreshold = m_config.inactivityThresholdMg,
+      .inactivityTime = m_config.inactivityTime
     };
+
+    LOG_INF("ADXL367 config: act=%umg/%u, inact=%umg/%u",
+            actConfig.activityThreshold, actConfig.activityTime,
+            actConfig.inactivityThreshold, actConfig.inactivityTime);
 
     result = m_motion.ConfigureActivity(actConfig);
     if (result < 0) { return result; }
