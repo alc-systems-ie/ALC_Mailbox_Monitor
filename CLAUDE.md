@@ -71,6 +71,62 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 - Immediate logging to UART
 - No Zephyr PM (uses direct System OFF)
 
+## MQTT Runtime Configuration
+
+### Configurable Parameters
+
+| Parameter | Type | Default | Min | Max | Unit | Description |
+|-----------|------|---------|-----|-----|------|-------------|
+| `mail_window` | uint32 | 240 | 1 | 86400 | seconds | Time window for open/close detection cycle |
+| `activity_threshold` | uint16 | 250 | 1 | 8000 | mg | Motion sensitivity for wake trigger |
+| `activity_time` | uint8 | 1 | 1 | 255 | samples | Consecutive samples above threshold to trigger |
+| `inactivity_threshold` | uint16 | 1200 | 1 | 8000 | mg | Threshold to return to inactive state |
+| `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
+
+### Command Topic
+
+```
+alc/{DEVICE_ID}/commands
+```
+
+### Command Formats (JSON)
+
+```json
+// Set individual parameters
+{"mail_window": 300}
+{"activity_threshold": 200}
+{"activity_time": 2}
+{"inactivity_threshold": 1000}
+{"inactivity_time": 15}
+
+// Reset all to factory defaults
+{"reset_config": true}
+
+// Request current config (publishes to status topic)
+{"status_request": true}
+```
+
+### Status Response Topic
+
+Device publishes to: `alc/{DEVICE_ID}/status`
+
+```json
+{
+  "mail_window": 240,
+  "activity_threshold": 250,
+  "activity_time": 1,
+  "inactivity_threshold": 1200,
+  "inactivity_time": 10
+}
+```
+
+### Implementation Notes
+
+- Commands should be **retained messages** so device receives on next connection
+- Configuration persists only until next System OFF (no flash storage)
+- ADXL367 parameters reconfigure immediately after command received
+- `mail_window` changes affect the next open/close cycle
+
 ## Development Notes
 
 ### Timer State Detection
