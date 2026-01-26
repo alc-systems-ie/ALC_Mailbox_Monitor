@@ -522,20 +522,54 @@ namespace alc
       sensorData.chargeStatus = Npm1300::ChargeStatus::Idle;
     }
 
-    bool isCharging = (sensorData.chargeStatus != Npm1300::ChargeStatus::Idle &&
-                       sensorData.chargeStatus != Npm1300::ChargeStatus::Complete);
+    // Convert charge status enum to string for JSON.
+    const char* chargeStatusStr;
+    switch (sensorData.chargeStatus) {
+      case Npm1300::ChargeStatus::Trickle:
+        chargeStatusStr = "trickle";
+        break;
+      case Npm1300::ChargeStatus::ConstantCurrent:
+        chargeStatusStr = "cc";
+        break;
+      case Npm1300::ChargeStatus::ConstantVoltage:
+        chargeStatusStr = "cv";
+        break;
+      case Npm1300::ChargeStatus::Complete:
+        chargeStatusStr = "complete";
+        break;
+      case Npm1300::ChargeStatus::Idle:
+      default:
+        chargeStatusStr = "idle";
+        break;
+    }
+
+    // Estimate SoC from voltage (simple linear approximation).
+    // Li-Po: 3.0V = 0%, 4.2V = 100%.
+    int level { static_cast<int>((sensorData.voltage - 3.0f) / 1.2f * 100.0f) };
+    if (level < 0) { level = 0; }
+    if (level > 100) { level = 100; }
+
+    // Convert to integer units for standardised format.
+    int voltage_mv { static_cast<int>(sensorData.voltage * 1000.0f) };
+    int current_ma { static_cast<int>(sensorData.current * 1000.0f) };
+    int temperature_c { static_cast<int>(sensorData.temperature) };
+
+    // VBUS connected indicates charging capability.
+    bool charging { m_pmic.IsVbusConnected() };
 
     int len { snprintf(message, sizeof(message),
-                       "{\"voltage_v\":%.2f,"
-                       "\"current_ma\":%.1f,"
-                       "\"temp_c\":%.1f,"
+                       "{\"level\":%d,"
+                       "\"voltage_mv\":%d,"
+                       "\"current_ma\":%d,"
+                       "\"temperature_c\":%d,"
                        "\"charging\":%s,"
-                       "\"vbus\":%s}",
-                       static_cast<double>(sensorData.voltage),
-                       static_cast<double>(sensorData.current * 1000.0f),
-                       static_cast<double>(sensorData.temperature),
-                       isCharging ? "true" : "false",
-                       m_pmic.IsVbusConnected() ? "true" : "false") };
+                       "\"charge_status\":\"%s\"}",
+                       level,
+                       voltage_mv,
+                       current_ma,
+                       temperature_c,
+                       charging ? "true" : "false",
+                       chargeStatusStr) };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_BATTERY);
 

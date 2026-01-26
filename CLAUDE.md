@@ -127,6 +127,50 @@ Device publishes to: `alc/{DEVICE_ID}/status`
 - ADXL367 parameters reconfigure immediately after command received
 - `mail_window` changes affect the next open/close cycle
 
+## Battery Status Message
+
+Device publishes to: `alc/{DEVICE_ID}/battery`
+
+### JSON Payload (Standardised Format)
+
+```json
+{
+  "level": 75,
+  "voltage_mv": 3800,
+  "current_ma": 150,
+  "temperature_c": 25,
+  "charging": true,
+  "charge_status": "cc"
+}
+```
+
+### Field Definitions
+
+| Field | Type | Unit | Description |
+|-------|------|------|-------------|
+| `level` | int | % | State of charge percentage (0-100) |
+| `voltage_mv` | int | mV | Battery voltage in millivolts |
+| `current_ma` | int | mA | Battery current in milliamps |
+| `temperature_c` | int | °C | Battery temperature in Celsius |
+| `charging` | bool | - | Whether VBUS is connected |
+| `charge_status` | string | - | Charging phase (see below) |
+
+### Charge Status Values
+
+- `idle` - Not charging
+- `trickle` - Trickle charge phase
+- `cc` - Constant current phase
+- `cv` - Constant voltage phase
+- `complete` - Charging complete
+
+### SoC Estimation
+
+The `level` field uses a simple linear voltage-based estimation:
+- 3.0V = 0%
+- 4.2V = 100%
+
+This provides a reasonable approximation for LP803448 Li-Po batteries without requiring the full fuel gauge algorithm to be initialised.
+
 ## Development Notes
 
 ### Timer State Detection
