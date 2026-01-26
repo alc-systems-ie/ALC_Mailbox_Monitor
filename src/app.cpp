@@ -868,12 +868,35 @@ namespace alc
     nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
     nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
 
-    // Read ADXL367 status to clear any pending interrupt.
+    // Read ADXL367 status to clear any pending interrupt event flags.
     Adxl367::Status status;
     m_motion.ReadStatus(status);
     LOG_INF("ADXL367 status: AWAKE=%d", status.awake);
 
-    // Small delay for INT1 to settle.
+    // Wait for ADXL367 to return to inactive state (AWAKE=0).
+    // This is critical: the GPIO latch only captures rising edges.
+    // If we enter System OFF while AWAKE=1, and it goes low during boot,
+    // no rising edge occurs and the latch won't be set on wake.
+    if (status.awake) {
+      LOG_INF("Waiting for ADXL367 to return to inactive state...");
+
+      constexpr uint32_t POLL_INTERVAL_MS { 100 };
+      constexpr uint32_t TIMEOUT_MS { 5000 };  // 5 second timeout.
+      uint32_t elapsed { 0 };
+
+      while (m_motion.IsAwake() && (elapsed < TIMEOUT_MS)) {
+        k_msleep(POLL_INTERVAL_MS);
+        elapsed += POLL_INTERVAL_MS;
+      }
+
+      if (elapsed >= TIMEOUT_MS) {
+        LOG_WRN("Timeout waiting for AWAKE to clear - proceeding anyway.");
+      } else {
+        LOG_INF("ADXL367 returned to inactive state after %u ms.", elapsed);
+      }
+    }
+
+    // Small delay for INT1 to settle after AWAKE clears.
     k_msleep(10);
 
     // Configure accelerometer INT1 - sense HIGH (AWAKE signal).
