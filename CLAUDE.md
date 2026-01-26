@@ -185,6 +185,12 @@ enum class WakeSource { Accelerometer, Timer, HallSensor, PowerOn };
 
 Hall sensor (P0.02) stubbed but not implemented.
 
+### ADXL367 AWAKE State Before System OFF
+
+The GPIO latch only captures **rising edges**. Before entering System OFF, the firmware waits for ADXL367 to return to inactive state (AWAKE=0). If AWAKE=1 when entering System OFF, and it clears during boot, no rising edge occurs and the latch won't be set - causing wake source detection to fail.
+
+See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
+
 ### Power Budget
 
 - System OFF: < 1 μA
