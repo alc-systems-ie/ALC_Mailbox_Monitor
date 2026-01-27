@@ -36,6 +36,7 @@
 #include "modem.hpp"
 #include "mqtt.hpp"
 #include "npm1300.hpp"
+#include "retained.hpp"
 
 namespace alc
 {
@@ -83,6 +84,7 @@ namespace alc
     SET_ACTIVITY_TIME,
     SET_INACTIVITY_THRESHOLD,
     SET_INACTIVITY_TIME,
+    SET_MAX_BUFFERED_EVENTS,
     RESET_CONFIG,
     REQUEST_STATUS,
     FIRMWARE_UPDATE,
@@ -159,6 +161,13 @@ namespace alc
        */
       void handleFreshBoot();
 
+      /**
+       * @brief Initialise the event buffer subsystem.
+       *
+       * Loads buffered events from NVS flash.
+       */
+      void initEventBuffer();
+
       // ========== Hardware Initialisation ==========
 
       /**
@@ -181,9 +190,20 @@ namespace alc
 
       /**
        * @brief Send mail delivered event.
+       * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
        * @param ownerIntervened Whether owner signalled (placeholder for future).
        */
-      bool sendMailDeliveredEvent(bool ownerIntervened);
+      bool sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened);
+
+      /**
+       * @brief Send all buffered mail events.
+       *
+       * Sends oldest events first with owner_intervened=true (to suppress SMS).
+       * The most recent event is sent with its actual owner_intervened value.
+       *
+       * @return true if all events were sent successfully.
+       */
+      bool sendBufferedEvents();
 
       /**
        * @brief Send heartbeat / status report.

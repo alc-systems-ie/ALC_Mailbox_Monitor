@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-nRF9151-based ultra-low-power mailbox delivery notification firmware for the Thingy91x platform. Detects mailbox opening/closing via ADXL367 accelerometer motion sensing and sends MQTT notifications over NB-IoT cellular.
+nRF9151-based ultra-low-power mailbox delivery notification firmware for the Thingy91x platform. Detects mailbox opening/closing via ADXL367 accelerometer motion sensing and sends MQTT notifications over LTE-M cellular.
 
 **Key design principle:** Minimize power via System OFF with nPM1300 persistent timer maintaining state across sleep cycles.
 
@@ -35,7 +35,8 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 |------|---------|
 | `src/main.cpp` | Entry point, creates App instance |
 | `src/app.cpp/hpp` | State machine, event orchestration |
-| `src/modem.cpp/hpp` | NB-IoT/LTE connectivity via nrf_modem_lib |
+| `src/modem.cpp/hpp` | LTE-M/NB-IoT connectivity via nrf_modem_lib |
+| `src/retained.cpp/hpp` | NVS flash event buffering for offline resilience |
 | `src/mqtt.cpp/hpp` | TLS MQTT client (HiveMQ Cloud) |
 | `src/adxl367.cpp/hpp` | Accelerometer driver (I2C, 180nA wake mode) |
 | `src/npm1300.cpp/hpp` | PMIC driver (timer, battery, charging) |
@@ -66,10 +67,11 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 ### prj.conf Highlights
 
 - C++20 enabled
-- NB-IoT mode (not LTE-M)
+- LTE-M mode (switched from NB-IoT for faster, more reliable connections)
 - TF-M for secure partition
 - Immediate logging to UART
 - No Zephyr PM (uses direct System OFF)
+- NVS flash for event buffering (nRF91 lacks RAM retention in System OFF)
 
 ## MQTT Runtime Configuration
 
@@ -82,6 +84,7 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 | `activity_time` | uint8 | 1 | 1 | 255 | samples | Consecutive samples above threshold to trigger |
 | `inactivity_threshold` | uint16 | 1200 | 1 | 8000 | mg | Threshold to return to inactive state |
 | `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
+| `max_buffered_events` | uint8 | 10 | 1 | 20 | events | Maximum mail events to buffer when offline |
 
 ### Command Topic
 
@@ -98,6 +101,7 @@ alc/{DEVICE_ID}/commands
 {"activity_time": 2}
 {"inactivity_threshold": 1000}
 {"inactivity_time": 15}
+{"max_buffered_events": 15}
 
 // Reset all to factory defaults
 {"reset_config": true}
@@ -116,7 +120,9 @@ Device publishes to: `alc/{DEVICE_ID}/status`
   "activity_threshold": 250,
   "activity_time": 1,
   "inactivity_threshold": 1200,
-  "inactivity_time": 10
+  "inactivity_time": 10,
+  "max_buffered_events": 10,
+  "buffered_events": 0
 }
 ```
 
@@ -191,6 +197,51 @@ The GPIO latch only captures **rising edges**. Before entering System OFF, the f
 
 See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
 
+### Event Buffering (NVS Flash)
+
+Mail delivery events are buffered in NVS flash when network connectivity fails. This ensures events aren't lost during outages and decouples the state machine from connectivity status.
+
+**Important:** nRF91 series does NOT support RAM retention in System OFF mode (unlike nRF52/nRF53). NVS flash is used instead.
+
+**Structure (`retained.hpp`):**
+```cpp
+struct BufferedEvent {
+    uint32_t timestamp;       // Seconds since boot (TODO: RTC epoch)
+    bool owner_intervened;    // Future: hall sensor detected
+};
+
+struct RetainedState {
+    uint32_t magic;           // 0x4D41494C ("MAIL") for validity
+    uint8_t event_count;      // Number of buffered events
+    uint8_t max_events;       // Runtime configurable (1-20)
+    BufferedEvent events[20]; // Circular buffer, oldest at index 0
+};
+```
+
+**Behaviour:**
+1. On every CLOSE event: Event is buffered to flash with timestamp
+2. After buffering: Attempt LTE connection and MQTT send
+3. On successful send: All buffered events transmitted, buffer cleared
+4. On connection failure: Events remain buffered for next CLOSE event
+5. Buffer full: Oldest event dropped to make room
+
+**SMS Flood Prevention:**
+When sending multiple buffered events (catch-up after outage):
+- Older events sent with `owner_intervened: true` to suppress SMS notifications
+- Most recent event sent with actual `owner_intervened` value
+- This prevents carers receiving a flood of SMS for stale events
+
+**Event Message Format:**
+```json
+{
+  "event": "mail_delivered",
+  "timestamp": 12345,
+  "owner_intervened": false
+}
+```
+
+The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
+
 ### Power Budget
 
 - System OFF: < 1 μA
@@ -209,7 +260,7 @@ See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100
 
 - NCS v3.1.0
 - Thingy91x hardware with LP803448 battery
-- SIM card with NB-IoT coverage
+- SIM card with LTE-M coverage
 
 ## File Structure
 
@@ -223,6 +274,7 @@ alc_mailbox_monitor/
 │   ├── app.cpp/hpp
 │   ├── modem.cpp/hpp
 │   ├── mqtt.cpp/hpp
+│   ├── retained.cpp/hpp
 │   ├── adxl367.cpp/hpp
 │   ├── npm1300.cpp/hpp (+ npm1300_const.hpp)
 │   ├── led.cpp/hpp

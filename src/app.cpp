@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "retained.hpp"
 #include <zephyr/logging/log.h>
 #include <zephyr/kernel.h>
 #include <hal/nrf_gpio.h>
@@ -62,6 +63,11 @@ namespace alc
       k_sleep(K_SECONDS(5));
       NVIC_SystemReset();
     }
+
+    // =========================================================================
+    // Initialise event buffer (loads from NVS flash).
+    // =========================================================================
+    initEventBuffer();
 
     LOG_INF("════════════════════════════════════════");
 
@@ -256,12 +262,18 @@ namespace alc
       // LED indication - green for mail delivery.
       m_led.SetColour(LedColours::GREEN);
 
-      // Connect and send mail delivery notification.
-      if (connectToCloud()) {
-        bool ownerIntervened { false };  // Placeholder for future Hall sensor.
+      // Get timestamp for this event.
+      // TODO: Replace with RTC epoch time once RTC hardware is fitted.
+      uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
+      bool ownerIntervened { false };  // Placeholder for future Hall sensor.
 
-        if (sendMailDeliveredEvent(ownerIntervened)) {
-          LOG_INF("Mail delivery event sent successfully.");
+      // Always buffer the event first (ensures it's not lost if connection fails).
+      bufferMailEvent(timestamp, ownerIntervened);
+
+      // Attempt to connect and send all buffered events.
+      if (connectToCloud()) {
+        if (sendBufferedEvents()) {
+          LOG_INF("All buffered events sent successfully.");
 
           // Also send battery status while connected.
           sendBatteryStatus();
@@ -269,14 +281,15 @@ namespace alc
           // Collect any pending commands.
           collectMqttCommands();
         } else {
-          LOG_ERR("Failed to send mail delivery event!");
+          LOG_ERR("Failed to send some buffered events!");
           m_led.SetColour(LedColours::RED);
           k_msleep(500);
         }
 
         disconnectFromCloud();
       } else {
-        LOG_ERR("Failed to connect to cloud!");
+        LOG_ERR("Failed to connect to cloud - events buffered for later.");
+        LOG_INF("Buffered events: %d", getBufferedEventCount());
         m_led.SetColour(LedColours::RED);
         k_msleep(500);
       }
@@ -302,8 +315,14 @@ namespace alc
     // Visual indication.
     m_led.SetColour(LedColours::BLUE);
 
-    // Connect and send heartbeat.
+    // Connect and send heartbeat (also sends any buffered events).
     if (connectToCloud()) {
+      // Send any buffered events first.
+      if (hasBufferedEvents()) {
+        LOG_INF("Sending %d buffered events...", getBufferedEventCount());
+        sendBufferedEvents();
+      }
+
       sendHeartbeat();
       sendBatteryStatus();
       collectMqttCommands();
@@ -402,6 +421,23 @@ namespace alc
     }
   }
 
+  // ========== Event Buffer Initialisation ==========
+
+  void App::initEventBuffer()
+  {
+    LOG_INF("Initialising event buffer from NVS flash...");
+
+    int result = retainedInit();
+    if (result < 0) {
+      LOG_ERR("Failed to initialise event buffer: %d", result);
+      // Continue anyway - will use defaults.
+    }
+
+    if (hasBufferedEvents()) {
+      LOG_INF("Found %d buffered events from previous session.", getBufferedEventCount());
+    }
+  }
+
   // ========== Timer Configuration ==========
 
   int App::configureMailWindowTimer()
@@ -482,14 +518,18 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailDeliveredEvent(bool ownerIntervened)
+  bool App::sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened)
   {
     char topic[64];
-    char message[128];
+    char message[256];
 
+    // TODO: When RTC is fitted, timestamp will be Unix epoch.
+    // For now it's seconds since boot.
     int len { snprintf(message, sizeof(message),
                        "{\"event\":\"mail_delivered\","
+                       "\"timestamp\":%u,"
                        "\"owner_intervened\":%s}",
+                       timestamp,
                        ownerIntervened ? "true" : "false") };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
@@ -502,6 +542,56 @@ namespace alc
     }
 
     return true;
+  }
+
+  bool App::sendBufferedEvents()
+  {
+    uint8_t count = getBufferedEventCount();
+    if (count == 0) {
+      return true;  // Nothing to send.
+    }
+
+    LOG_INF("Sending %d buffered events...", count);
+
+    bool allSent = true;
+
+    for (uint8_t i = 0; i < count; i++) {
+      BufferedEvent event;
+      if (!getBufferedEvent(i, event)) {
+        LOG_ERR("Failed to get buffered event %d", i);
+        allSent = false;
+        continue;
+      }
+
+      // For older events (all except the last), set owner_intervened=true
+      // to suppress SMS notifications and prevent flooding carers.
+      bool suppressSms = (i < count - 1);
+      bool ownerIntervened = suppressSms ? true : event.owner_intervened;
+
+      if (suppressSms) {
+        LOG_INF("Event %d/%d: timestamp=%u (catch-up, SMS suppressed)",
+                i + 1, count, event.timestamp);
+      } else {
+        LOG_INF("Event %d/%d: timestamp=%u, owner_intervened=%d",
+                i + 1, count, event.timestamp, event.owner_intervened);
+      }
+
+      if (!sendMailDeliveredEvent(event.timestamp, ownerIntervened)) {
+        LOG_ERR("Failed to send buffered event %d", i);
+        allSent = false;
+        // Continue trying to send remaining events.
+      }
+    }
+
+    // Clear buffer only if all events were sent.
+    if (allSent) {
+      clearBufferedEvents();
+      LOG_INF("All buffered events sent and cleared.");
+    } else {
+      LOG_WRN("Some events failed to send - buffer NOT cleared.");
+    }
+
+    return allSent;
   }
 
   bool App::sendBatteryStatus()
@@ -593,12 +683,16 @@ namespace alc
                        "\"activity_threshold\":%u,"
                        "\"activity_time\":%u,"
                        "\"inactivity_threshold\":%u,"
-                       "\"inactivity_time\":%u}",
+                       "\"inactivity_time\":%u,"
+                       "\"max_buffered_events\":%u,"
+                       "\"buffered_events\":%u}",
                        m_config.mailWindowSecs,
                        m_config.activityThresholdMg,
                        m_config.activityTime,
                        m_config.inactivityThresholdMg,
-                       m_config.inactivityTime) };
+                       m_config.inactivityTime,
+                       getMaxBufferedEvents(),
+                       getBufferedEventCount()) };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_STATUS);
 
@@ -688,6 +782,11 @@ namespace alc
       return MqttCommand::SET_INACTIVITY_TIME;
     }
 
+    // Event buffering configuration.
+    if (strstr(message, "\"max_buffered_events\"")) {
+      return MqttCommand::SET_MAX_BUFFERED_EVENTS;
+    }
+
     // Other commands.
     if (strstr(message, "\"status_request\"")) {
       return MqttCommand::REQUEST_STATUS;
@@ -765,6 +864,17 @@ namespace alc
           LOG_INF("Inactivity time set to %d samples.", value);
         } else {
           LOG_WRN("Invalid inactivity_time value: %d (must be 1-255).", value);
+        }
+        break;
+
+      case MqttCommand::SET_MAX_BUFFERED_EVENTS:
+        value = extractIntValue(message, "max_buffered_events");
+        if (value >= 1 && value <= static_cast<int>(BUFFER_HARDWARE_MAX)) {
+          setMaxBufferedEvents(static_cast<uint8_t>(value));
+          LOG_INF("Max buffered events set to %d.", value);
+        } else {
+          LOG_WRN("Invalid max_buffered_events value: %d (must be 1-%d).",
+                  value, BUFFER_HARDWARE_MAX);
         }
         break;
 
