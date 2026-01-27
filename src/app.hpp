@@ -88,6 +88,7 @@ namespace alc
     RESET_CONFIG,
     REQUEST_STATUS,
     FIRMWARE_UPDATE,
+    DEVICE_RESET,
     UNKNOWN
   };
 
@@ -264,6 +265,15 @@ namespace alc
        * This function does not return.
        */
       void enterSystemOff();
+
+      /**
+       * @brief Execute device reset via NVIC_SystemReset().
+       *
+       * Waits for nPM1300 timer to expire (or mail_window timeout) before
+       * resetting, to avoid interrupting an in-progress open/close cycle.
+       * This function does not return.
+       */
+      void executeDeviceReset();
 
       // ========== Utility ==========
 

@@ -108,7 +108,23 @@ alc/{DEVICE_ID}/commands
 
 // Request current config (publishes to status topic)
 {"status_request": true}
+
+// Device reset (waits for timer expiry, then reboots)
+{"reset_device": true}
 ```
+
+### Device Reset Behaviour
+
+The `reset_device` command triggers a full system reboot via `sys_reboot()`. To avoid interrupting an in-progress open/close cycle:
+
+1. If nPM1300 timer has expired: Reset immediately
+2. If timer is running: Wait for timer expiry OR `mail_window` seconds (whichever comes first)
+3. Shutdown modem cleanly
+4. Execute system reset
+
+After reset, the device goes through normal boot sequence including the 3-second timer initialisation that sets the expired flag, ensuring the next motion is correctly detected as an OPEN event.
+
+Buffered events are preserved across the reset.
 
 ### Status Response Topic
 

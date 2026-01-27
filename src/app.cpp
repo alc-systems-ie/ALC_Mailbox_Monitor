@@ -2,6 +2,7 @@
 #include "retained.hpp"
 #include <zephyr/logging/log.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
 #include <hal/nrf_regulators.h>
@@ -794,6 +795,9 @@ namespace alc
     if (strstr(message, "\"firmware_update\"")) {
       return MqttCommand::FIRMWARE_UPDATE;
     }
+    if (strstr(message, "\"reset_device\"")) {
+      return MqttCommand::DEVICE_RESET;
+    }
 
     return MqttCommand::UNKNOWN;
   }
@@ -885,6 +889,12 @@ namespace alc
 
       case MqttCommand::FIRMWARE_UPDATE:
         LOG_INF("Firmware update requested - not implemented yet.");
+        break;
+
+      case MqttCommand::DEVICE_RESET:
+        LOG_INF("Device reset requested.");
+        executeDeviceReset();
+        // Does not return.
         break;
 
       default:
@@ -1044,6 +1054,63 @@ namespace alc
 
     // Enter System OFF.
     NRF_REGULATORS->SYSTEMOFF = 1;
+
+    // Should never reach here.
+    while (true) {
+      k_sleep(K_FOREVER);
+    }
+  }
+
+  void App::executeDeviceReset()
+  {
+    LOG_INF("════════════════════════════════════════");
+    LOG_INF("DEVICE RESET REQUESTED");
+    LOG_INF("════════════════════════════════════════");
+
+    // Check if timer is running (mid-cycle).
+    bool timerExpired = m_pmic.TimerIsExpired();
+
+    if (!timerExpired) {
+      LOG_INF("Timer running - waiting for expiry before reset...");
+      LOG_INF("Maximum wait: %u seconds (mail window)", m_config.mailWindowSecs);
+
+      // Poll for timer expiry with mail_window as absolute timeout.
+      constexpr uint32_t POLL_INTERVAL_MS { 1000 };
+      uint32_t elapsed_ms { 0 };
+      uint32_t timeout_ms { m_config.mailWindowSecs * 1000 };
+
+      while (!m_pmic.TimerIsExpired() && elapsed_ms < timeout_ms) {
+        k_msleep(POLL_INTERVAL_MS);
+        elapsed_ms += POLL_INTERVAL_MS;
+
+        // Log progress every 30 seconds.
+        if ((elapsed_ms % 30000) == 0) {
+          LOG_INF("Waiting for timer... %u/%u seconds",
+                  elapsed_ms / 1000, m_config.mailWindowSecs);
+        }
+      }
+
+      if (elapsed_ms >= timeout_ms) {
+        LOG_WRN("Timeout waiting for timer - resetting anyway.");
+      } else {
+        LOG_INF("Timer expired after %u seconds.", elapsed_ms / 1000);
+      }
+    } else {
+      LOG_INF("Timer already expired - resetting immediately.");
+    }
+
+    // Shutdown modem cleanly before reset.
+    LOG_INF("Shutting down modem before reset...");
+    shutdownModem();
+
+    LOG_INF("Executing system reset...");
+    LOG_INF("════════════════════════════════════════");
+
+    // Small delay to allow logs to flush.
+    k_msleep(100);
+
+    // Perform system reset - this will not return.
+    sys_reboot(SYS_REBOOT_COLD);
 
     // Should never reach here.
     while (true) {
