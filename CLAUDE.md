@@ -40,7 +40,6 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 | `src/mqtt.cpp/hpp` | TLS MQTT client (HiveMQ Cloud) |
 | `src/adxl367.cpp/hpp` | Accelerometer driver (I2C, 180nA wake mode) |
 | `src/npm1300.cpp/hpp` | PMIC driver (timer, battery, charging) |
-| `src/led.cpp/hpp` | RGB LED via PWM |
 | `src/fuel_gauge.cpp/hpp` | Battery SoC estimation |
 
 ### Hardware Interfaces
@@ -272,13 +271,16 @@ The `timestamp` field currently uses uptime in seconds. Future hardware revision
 - ADXL367 wake mode: ~180 nA
 - Active (modem on): ~50-200 mA briefly
 
-### LED Status Colors
+### OPEN Event Timing Optimisation
 
-- BLUE: Boot/startup
-- AMBER: Processing motion wake
-- GREEN: Mail delivery confirmed
-- RED: Error
-- OFF: System OFF (normal state)
+To support fast mail deliveries (< 5 seconds open-to-close), hardware init is split:
+
+1. **Essential init** (always): PMIC, ADXL367 (~1.5 seconds)
+2. **Network init** (CLOSE only): Modem, MQTT (deferred)
+
+OPEN events skip network init entirely, reducing wake-to-sleep time from ~4.6s to ~1.5s.
+
+**Note:** LED code has been removed for production. Files `led.cpp/hpp` remain in repo but are not compiled.
 
 ## Build Requirements
 
@@ -301,7 +303,6 @@ alc_mailbox_monitor/
 │   ├── retained.cpp/hpp
 │   ├── adxl367.cpp/hpp
 │   ├── npm1300.cpp/hpp (+ npm1300_const.hpp)
-│   ├── led.cpp/hpp
 │   ├── fuel_gauge.cpp/hpp
 │   ├── certificate.h
 │   └── LP803448_battery_model.h
