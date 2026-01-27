@@ -153,10 +153,18 @@ namespace alc
 		  return m_connected;;
 	  }
 
-    // Wait with 3-minute timeout for network attach.
+    // Wait with timeout for network attach.
     if (k_sem_take(&m_lte_connected_sem, K_SECONDS(M_CONNECT_TIMEOUT)) != 0) {
-      LOG_ERR("CA-Timeout waiting for LTE connection!");
-      Disconnect();  // Modem shout be CFUN=0 prior to calling nrf_modem_lib_shutdown;
+      LOG_WRN("CA-Timeout waiting for LTE connection after %d seconds.", M_CONNECT_TIMEOUT);
+
+      // Clean shutdown sequence after timeout.
+      // lte_lc_offline() may fail here as async connect was interrupted.
+      int offlineResult = lte_lc_offline();
+      if (offlineResult) {
+        LOG_DBG("CA-lte_lc_offline returned %d (expected after timeout).", offlineResult);
+      }
+
+      // Shutdown modem library completely.
       nrf_modem_lib_shutdown();
       m_connected = false;
       return m_connected;
@@ -186,25 +194,32 @@ namespace alc
  
   bool Modem::Disconnect()
   {
-	  // LOG_INF("D-Disconnecting from LTE network.");
+    // Check if modem is even initialized before trying to disconnect.
+    if (!nrf_modem_is_initialized()) {
+      LOG_INF("D-Modem not initialized, skipping disconnect.");
+      m_connected = false;
+      return true;
+    }
 
-	  int result { lte_lc_offline() };
-	  if (result) {
-		  LOG_ERR("D-Error in lte_lc_offline, error: %d!", result);
-		  return false;
-	  }
+    // Try to go offline - may fail if modem is in unexpected state.
+    int result { lte_lc_offline() };
+    if (result) {
+      // Log as warning, not error - this can happen after timeout recovery.
+      LOG_WRN("D-lte_lc_offline returned %d (may be expected after timeout).", result);
+      // Continue to power_off anyway.
+    }
 
-	  result = lte_lc_power_off();
-	  if (result) {
-		  LOG_ERR("D-Error in nrf_modem_lib_shutdown, error: %d!", result);
-		  return false;
-	  }
+    result = lte_lc_power_off();
+    if (result) {
+      LOG_WRN("D-lte_lc_power_off returned %d.", result);
+      // Not fatal - modem may already be powered off.
+    }
 
     k_sleep(K_SECONDS(1));
 
-	  LOG_INF("D-Disconnected from LTE network.");
-    m_connected = false; 
-  	return true;
+    LOG_INF("D-Disconnected from LTE network.");
+    m_connected = false;
+    return true;
   }
   
   bool Modem::SetOffline()
