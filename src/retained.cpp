@@ -51,6 +51,12 @@ static int settingsSetHandler(const char* name, size_t len,
         return 0;
     }
 
+    // Ignore legacy keys (e.g., "pending" from old firmware) to prevent error logs.
+    if (strcmp(name, "pending") == 0) {
+        LOG_INF("Ignoring legacy settings key: mailbox/%s", name);
+        return 0;
+    }
+
     return -ENOENT;
 }
 
