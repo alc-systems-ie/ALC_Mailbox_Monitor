@@ -878,6 +878,14 @@ namespace alc
 
       case MqttCommand::DEVICE_RESET:
         LOG_INF("Device reset requested.");
+        // Clear the retained command by publishing empty message.
+        {
+          char cmdTopic[M_MQTT_TOPIC_LENGTH];
+          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
+          LOG_INF("Clearing retained reset command...");
+          m_mqtt.Publish(cmdTopic, "", 0, true);  // Empty retained message clears it.
+          k_msleep(500);  // Allow time for publish to complete.
+        }
         executeDeviceReset();
         // Does not return.
         break;
