@@ -135,15 +135,17 @@ Buffered events are preserved across the reset.
 
 ## Provisioning Mode
 
-Devices start in **provisioning mode** when first powered on (or after NVS is erased). In this mode, the device periodically wakes to check for an enable command rather than detecting mail events.
+Devices start in **provisioning mode** when first powered on (or after NVS magic changes). In this mode, the device stays awake and polls periodically for an enable command rather than detecting mail events.
 
 ### Behaviour
 
 1. **First Boot**: Device boots disabled (`enabled: false`) and enters provisioning mode
-2. **Polling Loop**: Device wakes every `poll_interval` seconds (default 60s)
-3. **On Wake**: Connects to MQTT, publishes status, checks for enable command
-4. **Enable Command**: When `{"enable": true}` received, device enables and runs normal 3s timer init
-5. **Normal Operation**: Device now detects OPEN/CLOSE mail events as usual
+2. **Polling Loop**: Device stays awake, polls every `poll_interval` seconds (default 60s) using `k_sleep()`
+3. **On Poll**: Connects to MQTT, publishes status, checks for enable command
+4. **Enable Command**: When `{"enable": true}` received, device saves state and reboots
+5. **Post-Enable Boot**: Device runs 3-second timer init, then enters System OFF for mail detection
+
+**Note:** Provisioning mode does NOT use System OFF - it stays awake to allow faster response to enable commands and simpler state management. Power consumption is higher but this is acceptable during initial setup.
 
 ### Provisioning Commands
 
@@ -173,7 +175,9 @@ struct RetainedState {
 A device can be returned to provisioning mode via:
 1. **Disable command**: `{"disable": true}` - takes effect on next boot/wake
 2. **Reset command**: `{"reset_device": true}` - resets and enters provisioning mode
-3. **NVS erase**: `west flash --erase` during programming
+3. **Change magic number**: Update `RetainedState::MAGIC` in `retained.hpp` to invalidate old NVS data
+
+**Note:** `west flash --erase` only erases internal flash. Settings are stored on external SPI flash which persists across internal erase.
 
 ### Status Response Topic
 
@@ -257,6 +261,17 @@ This provides a reasonable approximation for LP803448 Li-Po batteries without re
 
 Uses `EVENTSSHPHLDSET` bit 3, not `TIMERSTATUS` register. See `Npm1300::TimerIsExpired()`.
 
+**Important:** The timer must be configured before use:
+```cpp
+m_pmic.TimerConfigure(TimerMode::GeneralPurpose, TimerPrescaler::Slow);
+m_pmic.TimerSetDuration(seconds);  // Sets hi/mid/lo bytes + strobes
+m_pmic.TimerStart();
+// Wait for TimerIsExpired() to return true
+m_pmic.TimerClearEvent();  // Reset for next cycle
+```
+
+The 3-second timer initialisation on fresh boot establishes the "ready for OPEN" state by ensuring the expired flag is set.
+
 ### Wake Sources
 
 ```cpp
@@ -285,7 +300,7 @@ struct BufferedEvent {
 };
 
 struct RetainedState {
-    uint32_t magic;           // 0x4D41494C ("MAIL") for validity
+    uint32_t magic;           // 0x4D41494D ("MAIM") for validity - version 2
     uint8_t event_count;      // Number of buffered events
     uint8_t max_events;       // Runtime configurable (1-20)
     bool enabled;             // Device operational state (false = provisioning)

@@ -191,6 +191,18 @@ namespace alc
     LOG_INF("╚════════════════════════════════════════╝");
 
     // =========================================================================
+    // Check if device is enabled for normal operation.
+    // =========================================================================
+    // Note: This shouldn't happen since provisioning mode no longer uses System OFF,
+    // but handle it gracefully by entering provisioning loop.
+    if (!isEnabled()) {
+      LOG_INF("Device disabled - motion wake ignored.");
+      LOG_INF("Entering provisioning mode...");
+      handleProvisioningMode();
+      // Does not return (loops until enabled, then reboots).
+    }
+
+    // =========================================================================
     // Core Logic: Use ONLY TimerIsExpired() to determine event type
     // =========================================================================
     //
@@ -305,20 +317,15 @@ namespace alc
     m_pmic.TimerClearEvent();
 
     // Check if we're in provisioning mode.
+    // Note: This shouldn't happen since provisioning mode no longer uses System OFF,
+    // but handle it gracefully by entering provisioning loop.
     if (!isEnabled()) {
       LOG_INF("╔════════════════════════════════════════╗");
-      LOG_INF("║      TIMER WAKE (PROVISIONING)         ║");
+      LOG_INF("║      TIMER WAKE (DISABLED)             ║");
       LOG_INF("╚════════════════════════════════════════╝");
-
-      // Continue provisioning loop.
+      LOG_INF("Device disabled - entering provisioning mode.");
       handleProvisioningMode();
-      // If we return here, device was enabled - continue with normal startup.
-
-      if (isEnabled()) {
-        LOG_INF("Running normal boot sequence after enable...");
-        handleFreshBoot();
-      }
-      return;
+      // Does not return (loops until enabled, then reboots).
     }
 
     // Normal heartbeat mode.
@@ -382,8 +389,8 @@ namespace alc
     if (!isEnabled()) {
       LOG_INF("Device DISABLED - entering provisioning mode.");
       handleProvisioningMode();
-      // handleProvisioningMode() enters System OFF with poll timer.
-      // If we return here, device was enabled - continue with normal init.
+      // handleProvisioningMode() loops until enabled, then reboots.
+      // Does not return.
     }
 
     // =========================================================================
@@ -402,11 +409,34 @@ namespace alc
 
     LOG_INF("Initialising timer state (one-time %u second wait)...", INIT_TIMER_SECS);
 
-    // Clear any stale state.
+    // Configure timer mode (must be done before using the timer).
+    LOG_INF("Configuring timer for GP mode...");
+    int configResult = m_pmic.TimerConfigure(
+      Npm1300::TimerMode::GeneralPurpose,
+      Npm1300::TimerPrescaler::Slow
+    );
+    if (configResult < 0) {
+      LOG_ERR("Failed to configure timer: %d", configResult);
+    }
+
+    // Clear any stale state from PMIC (persists across MCU resets).
+    LOG_INF("Stopping any running timer...");
     m_pmic.TimerStop();
+    k_msleep(10);  // Allow PMIC to process stop command.
+
+    LOG_INF("Clearing timer event flag...");
     m_pmic.TimerClearEvent();
+    k_msleep(10);  // Allow PMIC to process clear command.
+
+    // Verify timer event is cleared.
+    if (m_pmic.TimerIsExpired()) {
+      LOG_WRN("Timer event flag still set after clear - clearing again.");
+      m_pmic.TimerClearEvent();
+      k_msleep(10);
+    }
 
     // Start short initialisation timer.
+    LOG_INF("Starting %u second init timer...", INIT_TIMER_SECS);
     int result = m_pmic.TimerSetDuration(INIT_TIMER_SECS);
     if (result < 0) {
       LOG_ERR("Failed to set init timer duration: %d", result);
@@ -418,20 +448,27 @@ namespace alc
     }
 
     // Wait for timer to expire.
+    LOG_INF("Waiting for timer to expire...");
     uint32_t elapsed { 0 };
     while (!m_pmic.TimerIsExpired() && (elapsed < TIMEOUT_MS)) {
       k_msleep(POLL_INTERVAL_MS);
       elapsed += POLL_INTERVAL_MS;
+      if ((elapsed % 1000) == 0) {
+        LOG_INF("  ... %u ms elapsed, checking timer status", elapsed);
+        m_pmic.DebugTimerState();
+      }
     }
 
     if (m_pmic.TimerIsExpired()) {
-      LOG_INF("Init timer expired - state ready (Expired=TRUE).");
+      LOG_INF("Init timer expired after %u ms - state ready.", elapsed);
       // IMPORTANT: Do NOT clear the expired flag!
       // Leaving it SET means TimerIsExpired() returns TRUE = ready for OPEN.
     } else {
-      LOG_ERR("Init timer did not expire within timeout!");
-      // Force the expired state by clearing and leaving.
+      LOG_ERR("Init timer did not expire within timeout! (elapsed=%u ms)", elapsed);
+      // Force the expired state by stopping timer - this is a fallback.
       m_pmic.TimerStop();
+      // Note: Without the expired flag set, first motion will be treated as CLOSE.
+      // This is a bug, but at least the device won't be stuck.
     }
   }
 
@@ -444,55 +481,51 @@ namespace alc
     LOG_INF("╚════════════════════════════════════════╝");
     LOG_INF("Polling every %u seconds for enable command.", getPollInterval());
 
-    // Initialise network hardware.
+    // Initialise network hardware once.
     if (!initNetworkHardware()) {
-      LOG_ERR("Network init failed in provisioning mode - sleeping...");
-      goto sleep;
+      LOG_ERR("Network init failed in provisioning mode!");
+      // Still enter the loop - will retry on next iteration.
     }
 
-    // Connect and send status/battery, check for commands.
-    if (connectToCloud()) {
-      sendConfigStatus();  // Includes enabled:false, provisioning:true.
-      sendBatteryStatus();
-      collectMqttCommands();  // Will process enable command if present.
-      disconnectFromCloud();
-    } else {
-      LOG_ERR("Failed to connect in provisioning mode.");
+    // =========================================================================
+    // Provisioning Loop: Stay awake, poll periodically for enable command.
+    // =========================================================================
+    // Unlike normal operation, provisioning mode does NOT use System OFF.
+    // This allows faster response to enable commands and simpler state management.
+    // The device will reboot when enabled to ensure clean timer state.
+    // =========================================================================
+
+    while (!isEnabled()) {
+      LOG_INF("────────────────────────────────────────");
+      LOG_INF("Provisioning poll cycle starting...");
+
+      // Connect and send status/battery, check for commands.
+      if (connectToCloud()) {
+        sendConfigStatus();  // Includes enabled:false, provisioning:true.
+        sendBatteryStatus();
+        collectMqttCommands();  // Will process enable command if present.
+        disconnectFromCloud();
+      } else {
+        LOG_ERR("Failed to connect in provisioning mode.");
+      }
+
+      // Check if we were enabled by a command.
+      if (isEnabled()) {
+        LOG_INF("Device ENABLED - rebooting into normal mode...");
+        k_msleep(100);  // Allow logs to flush.
+        sys_reboot(SYS_REBOOT_COLD);
+        // Does not return.
+      }
+
+      // Sleep for poll interval (staying awake, not System OFF).
+      LOG_INF("Still disabled - waiting %u seconds...", getPollInterval());
+      k_sleep(K_SECONDS(getPollInterval()));
     }
 
-    // Check if we were enabled by a command.
-    if (isEnabled()) {
-      LOG_INF("Device ENABLED - exiting provisioning mode.");
-      return;  // Return to handleFreshBoot() to continue normal startup.
-    }
-
-sleep:
-    // Start poll timer and enter System OFF.
-    LOG_INF("Still disabled - sleeping for %u seconds...", getPollInterval());
-
-    m_pmic.TimerStop();
-    m_pmic.TimerClearEvent();
-
-    int result = m_pmic.TimerSetDuration(getPollInterval());
-    if (result < 0) {
-      LOG_ERR("Failed to set poll timer duration: %d", result);
-    }
-
-    result = m_pmic.TimerStart();
-    if (result < 0) {
-      LOG_ERR("Failed to start poll timer: %d", result);
-    }
-
-    // Configure wake sources and enter System OFF.
-    // Note: We need timer wake to continue provisioning loop.
-    configureWakeSources();
-    shutdownModem();
-
-    k_msleep(100);  // Allow logs to flush.
-
-    // Enter System OFF - will wake on timer.
-    enterSystemOff();
-    // Does not return.
+    // Should not reach here, but if we do, reboot.
+    LOG_INF("Exiting provisioning mode - rebooting...");
+    k_msleep(100);
+    sys_reboot(SYS_REBOOT_COLD);
   }
 
   // ========== Event Buffer Initialisation ==========
@@ -840,6 +873,11 @@ sleep:
 
   MqttCommand App::parseCommand(const char* message, size_t length)
   {
+    // Ignore empty messages (e.g., cleared retained messages).
+    if (length == 0 || message == nullptr || message[0] == '\0') {
+      return MqttCommand::UNKNOWN;
+    }
+
     // Check for reset first (takes priority).
     if (strstr(message, "\"reset_config\"")) {
       return MqttCommand::RESET_CONFIG;

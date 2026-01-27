@@ -41,8 +41,9 @@ static int settingsSetHandler(const char* name, size_t len,
         // Validate magic number.
         if (g_retained.magic == RetainedState::MAGIC) {
             s_valid = true;
-            LOG_INF("Loaded retained state: %d buffered events (max %d)",
-                    g_retained.event_count, g_retained.max_events);
+            LOG_INF("Loaded retained state: %d buffered events (max %d), enabled=%s",
+                    g_retained.event_count, g_retained.max_events,
+                    g_retained.enabled ? "true" : "false");
         } else {
             LOG_WRN("Invalid magic in retained state: 0x%08X", g_retained.magic);
             s_valid = false;

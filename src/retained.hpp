@@ -61,7 +61,7 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D41494C;  // "MAIL" in ASCII.
+    static constexpr uint32_t MAGIC = 0x4D41494D;  // "MAIM" - version 2 with provisioning.
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).

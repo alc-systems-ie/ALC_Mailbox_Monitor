@@ -349,6 +349,27 @@ namespace alc {
     return OK;
   }
 
+  void Npm1300::DebugTimerState()
+  {
+    uint8_t timerStatus { 0 };
+    uint8_t eventReg { 0 };
+    uint8_t timerHi { 0 }, timerMid { 0 }, timerLo { 0 };
+
+    readRegister(Cmn::M_TIMER_BASE, Cmn::M_TIMERSTATUS_OFFSET, timerStatus);
+    readRegister(Cmn::M_MAIN_BASE, Cmn::M_EVENTSSHPHLDSET_OFFSET, eventReg);
+    readRegister(Cmn::M_TIMER_BASE, Cmn::M_TIMERHIBYTE_OFFSET, timerHi);
+    readRegister(Cmn::M_TIMER_BASE, Cmn::M_TIMERMIDBYTE_OFFSET, timerMid);
+    readRegister(Cmn::M_TIMER_BASE, Cmn::M_TIMERLOBYTE_OFFSET, timerLo);
+
+    uint32_t timerValue = (static_cast<uint32_t>(timerHi) << 16) |
+                          (static_cast<uint32_t>(timerMid) << 8) |
+                          static_cast<uint32_t>(timerLo);
+
+    LOG_INF("Timer debug: STATUS=0x%02X, EVENTS=0x%02X, VALUE=%u (0x%06X)",
+            timerStatus, eventReg, timerValue, timerValue);
+    LOG_INF("  Expired bit (bit3): %s", (eventReg & TIMER_EVENT_BIT) ? "SET" : "CLEAR");
+  }
+
   int Npm1300::TimerConfigureGpioInterrupt(uint8_t gpioNum)
   {
     constexpr int OK { 0 };

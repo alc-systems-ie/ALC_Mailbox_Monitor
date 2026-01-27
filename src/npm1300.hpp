@@ -316,6 +316,11 @@ namespace alc
       int TimerClearEvent();
 
       /**
+       * @brief Debug: Print timer-related register values.
+       */
+      void DebugTimerState();
+
+      /**
        * @brief Configure GPIO as interrupt output for timer events.
        * 
        * Sets up the specified GPIO to output high when the timer expires.
