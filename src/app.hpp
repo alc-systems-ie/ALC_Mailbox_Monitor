@@ -51,6 +51,11 @@ namespace alc
   constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 1200 };// Inactivity threshold in mg.
   constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
 
+  // Provisioning mode poll interval limits (seconds).
+  constexpr uint16_t M_DEFAULT_POLL_INTERVAL { 60 };
+  constexpr uint16_t M_MIN_POLL_INTERVAL { 10 };
+  constexpr uint16_t M_MAX_POLL_INTERVAL { 300 };
+
   // MQTT settings.
   constexpr size_t M_MQTT_MESSAGE_LENGTH { 256 };
   constexpr size_t M_MQTT_TOPIC_LENGTH { 128 };
@@ -88,6 +93,9 @@ namespace alc
     REQUEST_STATUS,
     FIRMWARE_UPDATE,
     DEVICE_RESET,
+    ENABLE,
+    DISABLE,
+    SET_POLL_INTERVAL,
     UNKNOWN
   };
 
@@ -160,6 +168,14 @@ namespace alc
        * @brief Handle fresh boot / power-on.
        */
       void handleFreshBoot();
+
+      /**
+       * @brief Handle provisioning mode when device is disabled.
+       *
+       * Connects to cloud, sends status, checks for enable command, then
+       * sleeps for poll_interval. Does not return until device is enabled.
+       */
+      void handleProvisioningMode();
 
       /**
        * @brief Initialise the event buffer subsystem.

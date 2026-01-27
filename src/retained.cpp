@@ -116,6 +116,8 @@ void initRetainedState()
     g_retained.magic = RetainedState::MAGIC;
     g_retained.event_count = 0;
     g_retained.max_events = DEFAULT_MAX_BUFFERED_EVENTS;
+    g_retained.enabled = false;  // Start in provisioning mode.
+    g_retained.poll_interval = DEFAULT_POLL_INTERVAL;
     memset(g_retained.events, 0, sizeof(g_retained.events));
     s_valid = true;
 
@@ -201,6 +203,39 @@ void clearBufferedEvents()
         g_retained.event_count = 0;
         saveState();
     }
+}
+
+void setEnabled(bool enabled)
+{
+    if (g_retained.enabled != enabled) {
+        g_retained.enabled = enabled;
+        LOG_INF("Device %s.", enabled ? "ENABLED" : "DISABLED");
+        saveState();
+    }
+}
+
+bool isEnabled()
+{
+    return g_retained.enabled;
+}
+
+void setPollInterval(uint16_t seconds)
+{
+    // Clamp to valid range (10-300 seconds).
+    if (seconds < 10) {
+        seconds = 10;
+    } else if (seconds > 300) {
+        seconds = 300;
+    }
+
+    g_retained.poll_interval = seconds;
+    LOG_INF("Poll interval set to %u seconds.", seconds);
+    saveState();
+}
+
+uint16_t getPollInterval()
+{
+    return g_retained.poll_interval;
 }
 
 } // namespace alc

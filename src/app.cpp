@@ -297,16 +297,34 @@ namespace alc
     LOG_INF("Motion wake handling complete.");
   }
 
-  // ========== Timer Wake Handler (Future - Heartbeat) ==========
+  // ========== Timer Wake Handler ==========
 
   void App::handleTimerWake()
   {
+    // Clear the timer event.
+    m_pmic.TimerClearEvent();
+
+    // Check if we're in provisioning mode.
+    if (!isEnabled()) {
+      LOG_INF("╔════════════════════════════════════════╗");
+      LOG_INF("║      TIMER WAKE (PROVISIONING)         ║");
+      LOG_INF("╚════════════════════════════════════════╝");
+
+      // Continue provisioning loop.
+      handleProvisioningMode();
+      // If we return here, device was enabled - continue with normal startup.
+
+      if (isEnabled()) {
+        LOG_INF("Running normal boot sequence after enable...");
+        handleFreshBoot();
+      }
+      return;
+    }
+
+    // Normal heartbeat mode.
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║          TIMER WAKE (HEARTBEAT)        ║");
     LOG_INF("╚════════════════════════════════════════╝");
-
-    // Clear the timer event.
-    m_pmic.TimerClearEvent();
 
     // Initialise network hardware for heartbeat.
     if (!initNetworkHardware()) {
@@ -359,6 +377,16 @@ namespace alc
     LOG_INF("╚════════════════════════════════════════╝");
 
     // =========================================================================
+    // Check if device is enabled for normal operation.
+    // =========================================================================
+    if (!isEnabled()) {
+      LOG_INF("Device DISABLED - entering provisioning mode.");
+      handleProvisioningMode();
+      // handleProvisioningMode() enters System OFF with poll timer.
+      // If we return here, device was enabled - continue with normal init.
+    }
+
+    // =========================================================================
     // Initialise timer state: Run short timer and wait for expiry
     // =========================================================================
     //
@@ -405,6 +433,66 @@ namespace alc
       // Force the expired state by clearing and leaving.
       m_pmic.TimerStop();
     }
+  }
+
+  // ========== Provisioning Mode Handler ==========
+
+  void App::handleProvisioningMode()
+  {
+    LOG_INF("╔════════════════════════════════════════╗");
+    LOG_INF("║         PROVISIONING MODE              ║");
+    LOG_INF("╚════════════════════════════════════════╝");
+    LOG_INF("Polling every %u seconds for enable command.", getPollInterval());
+
+    // Initialise network hardware.
+    if (!initNetworkHardware()) {
+      LOG_ERR("Network init failed in provisioning mode - sleeping...");
+      goto sleep;
+    }
+
+    // Connect and send status/battery, check for commands.
+    if (connectToCloud()) {
+      sendConfigStatus();  // Includes enabled:false, provisioning:true.
+      sendBatteryStatus();
+      collectMqttCommands();  // Will process enable command if present.
+      disconnectFromCloud();
+    } else {
+      LOG_ERR("Failed to connect in provisioning mode.");
+    }
+
+    // Check if we were enabled by a command.
+    if (isEnabled()) {
+      LOG_INF("Device ENABLED - exiting provisioning mode.");
+      return;  // Return to handleFreshBoot() to continue normal startup.
+    }
+
+sleep:
+    // Start poll timer and enter System OFF.
+    LOG_INF("Still disabled - sleeping for %u seconds...", getPollInterval());
+
+    m_pmic.TimerStop();
+    m_pmic.TimerClearEvent();
+
+    int result = m_pmic.TimerSetDuration(getPollInterval());
+    if (result < 0) {
+      LOG_ERR("Failed to set poll timer duration: %d", result);
+    }
+
+    result = m_pmic.TimerStart();
+    if (result < 0) {
+      LOG_ERR("Failed to start poll timer: %d", result);
+    }
+
+    // Configure wake sources and enter System OFF.
+    // Note: We need timer wake to continue provisioning loop.
+    configureWakeSources();
+    shutdownModem();
+
+    k_msleep(100);  // Allow logs to flush.
+
+    // Enter System OFF - will wake on timer.
+    enterSystemOff();
+    // Does not return.
   }
 
   // ========== Event Buffer Initialisation ==========
@@ -662,16 +750,24 @@ namespace alc
   bool App::sendConfigStatus()
   {
     char topic[64];
-    char message[256];
+    char message[320];
+
+    bool enabled = isEnabled();
 
     int len { snprintf(message, sizeof(message),
-                       "{\"mail_window\":%u,"
+                       "{\"enabled\":%s,"
+                       "\"provisioning\":%s,"
+                       "\"poll_interval\":%u,"
+                       "\"mail_window\":%u,"
                        "\"activity_threshold\":%u,"
                        "\"activity_time\":%u,"
                        "\"inactivity_threshold\":%u,"
                        "\"inactivity_time\":%u,"
                        "\"max_buffered_events\":%u,"
                        "\"buffered_events\":%u}",
+                       enabled ? "true" : "false",
+                       enabled ? "false" : "true",
+                       getPollInterval(),
                        m_config.mailWindowSecs,
                        m_config.activityThresholdMg,
                        m_config.activityTime,
@@ -784,6 +880,17 @@ namespace alc
       return MqttCommand::DEVICE_RESET;
     }
 
+    // Provisioning mode commands.
+    if (strstr(message, "\"enable\"")) {
+      return MqttCommand::ENABLE;
+    }
+    if (strstr(message, "\"disable\"")) {
+      return MqttCommand::DISABLE;
+    }
+    if (strstr(message, "\"poll_interval\"")) {
+      return MqttCommand::SET_POLL_INTERVAL;
+    }
+
     return MqttCommand::UNKNOWN;
   }
 
@@ -886,8 +993,47 @@ namespace alc
           m_mqtt.Publish(cmdTopic, "", 0, true);  // Empty retained message clears it.
           k_msleep(500);  // Allow time for publish to complete.
         }
+        // Disable device so it returns to provisioning mode after reset.
+        setEnabled(false);
         executeDeviceReset();
         // Does not return.
+        break;
+
+      case MqttCommand::ENABLE:
+        LOG_INF("Enable command received.");
+        // Clear the retained command.
+        {
+          char cmdTopic[M_MQTT_TOPIC_LENGTH];
+          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
+          LOG_INF("Clearing retained enable command...");
+          m_mqtt.Publish(cmdTopic, "", 0, true);
+          k_msleep(500);
+        }
+        setEnabled(true);
+        break;
+
+      case MqttCommand::DISABLE:
+        LOG_INF("Disable command received.");
+        // Clear the retained command.
+        {
+          char cmdTopic[M_MQTT_TOPIC_LENGTH];
+          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
+          LOG_INF("Clearing retained disable command...");
+          m_mqtt.Publish(cmdTopic, "", 0, true);
+          k_msleep(500);
+        }
+        setEnabled(false);
+        break;
+
+      case MqttCommand::SET_POLL_INTERVAL:
+        value = extractIntValue(message, "poll_interval");
+        if (value >= M_MIN_POLL_INTERVAL && value <= M_MAX_POLL_INTERVAL) {
+          setPollInterval(static_cast<uint16_t>(value));
+          LOG_INF("Poll interval set to %d seconds.", value);
+        } else {
+          LOG_WRN("Invalid poll_interval value: %d (must be %d-%d).",
+                  value, M_MIN_POLL_INTERVAL, M_MAX_POLL_INTERVAL);
+        }
         break;
 
       default:

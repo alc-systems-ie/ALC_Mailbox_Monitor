@@ -43,6 +43,9 @@ static constexpr uint8_t BUFFER_HARDWARE_MAX { 20 };
 // Default buffer size.
 static constexpr uint8_t DEFAULT_MAX_BUFFERED_EVENTS { 10 };
 
+// Default provisioning poll interval (seconds).
+static constexpr uint16_t DEFAULT_POLL_INTERVAL { 60 };
+
 /**
  * @brief A single buffered mail delivery event.
  */
@@ -63,7 +66,9 @@ struct RetainedState {
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
     uint8_t max_events;                            ///< Current max buffer size (runtime config).
-    uint8_t reserved[2];                           ///< Padding for alignment.
+    bool enabled;                                  ///< Device operational state (false = provisioning mode).
+    uint8_t reserved;                              ///< Padding for alignment.
+    uint16_t poll_interval;                        ///< Provisioning poll interval (seconds).
     BufferedEvent events[BUFFER_HARDWARE_MAX];     ///< Event buffer, oldest at index 0.
 };
 
@@ -154,5 +159,40 @@ inline bool hasBufferedEvents()
 {
     return g_retained.event_count > 0;
 }
+
+/**
+ * @brief Set the device enabled state.
+ *
+ * When disabled (false), device operates in provisioning mode, polling
+ * periodically for an enable command. When enabled (true), device operates
+ * normally, detecting mail delivery events.
+ *
+ * @param enabled True to enable normal operation, false for provisioning mode.
+ */
+void setEnabled(bool enabled);
+
+/**
+ * @brief Get the device enabled state.
+ *
+ * @return true if device is enabled for normal operation.
+ */
+bool isEnabled();
+
+/**
+ * @brief Set the provisioning poll interval.
+ *
+ * Determines how often the device wakes in provisioning mode to check
+ * for enable commands.
+ *
+ * @param seconds Poll interval in seconds (clamped to valid range).
+ */
+void setPollInterval(uint16_t seconds);
+
+/**
+ * @brief Get the provisioning poll interval.
+ *
+ * @return Poll interval in seconds.
+ */
+uint16_t getPollInterval();
 
 } // namespace alc

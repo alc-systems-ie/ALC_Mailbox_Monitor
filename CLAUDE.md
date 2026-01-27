@@ -84,6 +84,7 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 | `inactivity_threshold` | uint16 | 1200 | 1 | 8000 | mg | Threshold to return to inactive state |
 | `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
 | `max_buffered_events` | uint8 | 10 | 1 | 20 | events | Maximum mail events to buffer when offline |
+| `poll_interval` | uint16 | 60 | 10 | 300 | seconds | Provisioning mode wake/poll interval |
 
 ### Command Topic
 
@@ -94,6 +95,11 @@ alc/{DEVICE_ID}/commands
 ### Command Formats (JSON)
 
 ```json
+// Provisioning mode commands
+{"enable": true}              // Enable device, exit provisioning mode
+{"disable": true}             // Disable device, enter provisioning mode
+{"poll_interval": 30}         // Set provisioning poll interval (10-300s)
+
 // Set individual parameters
 {"mail_window": 300}
 {"activity_threshold": 200}
@@ -108,7 +114,7 @@ alc/{DEVICE_ID}/commands
 // Request current config (publishes to status topic)
 {"status_request": true}
 
-// Device reset (waits for timer expiry, then reboots)
+// Device reset (waits for timer expiry, then reboots, returns to provisioning mode)
 {"reset_device": true}
 ```
 
@@ -125,12 +131,59 @@ After reset, the device goes through normal boot sequence including the 3-second
 
 Buffered events are preserved across the reset.
 
+**Note:** `reset_device` also sets `enabled = false`, returning the device to provisioning mode after reset.
+
+## Provisioning Mode
+
+Devices start in **provisioning mode** when first powered on (or after NVS is erased). In this mode, the device periodically wakes to check for an enable command rather than detecting mail events.
+
+### Behaviour
+
+1. **First Boot**: Device boots disabled (`enabled: false`) and enters provisioning mode
+2. **Polling Loop**: Device wakes every `poll_interval` seconds (default 60s)
+3. **On Wake**: Connects to MQTT, publishes status, checks for enable command
+4. **Enable Command**: When `{"enable": true}` received, device enables and runs normal 3s timer init
+5. **Normal Operation**: Device now detects OPEN/CLOSE mail events as usual
+
+### Provisioning Commands
+
+| Command | Description |
+|---------|-------------|
+| `{"enable": true}` | Enable device, exit provisioning mode |
+| `{"disable": true}` | Disable device, enter provisioning mode on next boot |
+| `{"poll_interval": 30}` | Set provisioning poll interval (10-300 seconds) |
+
+Commands should be **retained messages**. The enable/disable commands are automatically cleared after being processed to prevent repeated execution.
+
+### State Persistence
+
+The `enabled` and `poll_interval` values are stored in NVS flash and persist across System OFF cycles:
+
+```cpp
+struct RetainedState {
+    ...
+    bool enabled;           // Device operational state
+    uint16_t poll_interval; // Provisioning poll interval (seconds)
+    ...
+};
+```
+
+### Disabling a Device
+
+A device can be returned to provisioning mode via:
+1. **Disable command**: `{"disable": true}` - takes effect on next boot/wake
+2. **Reset command**: `{"reset_device": true}` - resets and enters provisioning mode
+3. **NVS erase**: `west flash --erase` during programming
+
 ### Status Response Topic
 
 Device publishes to: `alc/{DEVICE_ID}/status`
 
 ```json
 {
+  "enabled": true,
+  "provisioning": false,
+  "poll_interval": 60,
   "mail_window": 240,
   "activity_threshold": 250,
   "activity_time": 1,
@@ -140,6 +193,12 @@ Device publishes to: `alc/{DEVICE_ID}/status`
   "buffered_events": 0
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | bool | `true` when device is in normal operation mode |
+| `provisioning` | bool | `true` when device is in provisioning mode (inverse of enabled) |
+| `poll_interval` | uint16 | Provisioning mode wake interval in seconds |
 
 ### Implementation Notes
 
@@ -229,6 +288,8 @@ struct RetainedState {
     uint32_t magic;           // 0x4D41494C ("MAIL") for validity
     uint8_t event_count;      // Number of buffered events
     uint8_t max_events;       // Runtime configurable (1-20)
+    bool enabled;             // Device operational state (false = provisioning)
+    uint16_t poll_interval;   // Provisioning poll interval (seconds)
     BufferedEvent events[20]; // Circular buffer, oldest at index 0
 };
 ```
