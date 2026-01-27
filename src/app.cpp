@@ -35,8 +35,7 @@ namespace alc
   // ========== Constructor ==========
 
   App::App()
-      : m_led()
-      , m_modem(*this)
+      : m_modem(*this)
       , m_motion(i2c_dev, Adxl367::I2cAddress::AddrLow)
       , m_mqtt(*this)
       , m_pmic { DEVICE_DT_GET(DT_NODELABEL(pmic_main)), DEVICE_DT_GET(DT_NODELABEL(npm1300_charger)) }
@@ -116,17 +115,10 @@ namespace alc
   {
     LOG_INF("Device ID: %s", M_DEVICE_ID);
 
-    // Initialise LED.
-    if (!m_led.Init()) {
-      LOG_ERR("LED init failed!");
-      return false;
-    }
-    LOG_INF("LED initialised.");
-
-    // Brief LED flash to indicate boot.
-    m_led.SetColour(LedColours::BLUE);
-    k_msleep(100);
-    m_led.SetColour(LedColours::OFF);
+    // =========================================================================
+    // Essential hardware only - PMIC and accelerometer.
+    // Modem/MQTT initialised lazily on CLOSE events to speed up OPEN events.
+    // =========================================================================
 
     // Check PMIC device.
     if (!device_is_ready(DEVICE_DT_GET(DT_NODELABEL(pmic_main)))) {
@@ -144,13 +136,6 @@ namespace alc
     }
     LOG_INF("nPM1300 PMIC initialised.");
 
-    // Initialise modem.
-    if (!m_modem.Init()) {
-      LOG_ERR("Modem init failed!");
-      return false;
-    }
-    LOG_INF("Modem initialised.");
-
     // Initialise ADXL367.
     int result = m_motion.Init();
     if (result < 0) {
@@ -167,7 +152,22 @@ namespace alc
     }
     LOG_INF("ADXL367 configured for wake-up mode.");
 
-    // Initialise MQTT client (requires modem but not connection).
+    LOG_INF("Hardware initialisation complete.");
+    return true;
+  }
+
+  bool App::initNetworkHardware()
+  {
+    LOG_INF("Initialising network hardware...");
+
+    // Initialise modem.
+    if (!m_modem.Init()) {
+      LOG_ERR("Modem init failed!");
+      return false;
+    }
+    LOG_INF("Modem initialised.");
+
+    // Initialise MQTT client.
     if (!m_mqtt.Init()) {
       LOG_ERR("MQTT init failed!");
       return false;
@@ -177,7 +177,8 @@ namespace alc
     // Ensure modem is disconnected for clean state.
     m_modem.Disconnect();
 
-    LOG_INF("Hardware initialisation complete.");
+    m_networkInitialised = true;
+    LOG_INF("Network hardware initialisation complete.");
     return true;
   }
 
@@ -188,9 +189,6 @@ namespace alc
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║         MOTION WAKE DETECTED           ║");
     LOG_INF("╚════════════════════════════════════════╝");
-
-    // Visual indication.
-    m_led.SetColour(LedColours::AMBER);
 
     // =========================================================================
     // Core Logic: Use ONLY TimerIsExpired() to determine event type
@@ -247,7 +245,7 @@ namespace alc
         LOG_INF("Timer started: %u second window.", m_config.mailWindowSecs);
       }
 
-      // No network activity needed for open event.
+      // No network activity needed for open event - go straight back to sleep.
       LOG_INF("Open event recorded. Waiting for close event...");
 
     } else {
@@ -260,9 +258,6 @@ namespace alc
       // This resets the state to "ready for OPEN" automatically.
       LOG_INF("Timer left running - will expire and reset state.");
 
-      // LED indication - green for mail delivery.
-      m_led.SetColour(LedColours::GREEN);
-
       // Get timestamp for this event.
       // TODO: Replace with RTC epoch time once RTC hardware is fitted.
       uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
@@ -270,6 +265,13 @@ namespace alc
 
       // Always buffer the event first (ensures it's not lost if connection fails).
       bufferMailEvent(timestamp, ownerIntervened);
+
+      // Initialise network hardware (modem, MQTT) - only needed for CLOSE events.
+      if (!initNetworkHardware()) {
+        LOG_ERR("Network init failed - event buffered for later.");
+        LOG_INF("Buffered events: %d", getBufferedEventCount());
+        return;
+      }
 
       // Attempt to connect and send all buffered events.
       if (connectToCloud()) {
@@ -283,21 +285,14 @@ namespace alc
           collectMqttCommands();
         } else {
           LOG_ERR("Failed to send some buffered events!");
-          m_led.SetColour(LedColours::RED);
-          k_msleep(500);
         }
 
         disconnectFromCloud();
       } else {
         LOG_ERR("Failed to connect to cloud - events buffered for later.");
         LOG_INF("Buffered events: %d", getBufferedEventCount());
-        m_led.SetColour(LedColours::RED);
-        k_msleep(500);
       }
     }
-
-    // Turn off LED.
-    m_led.SetColour(LedColours::OFF);
 
     LOG_INF("Motion wake handling complete.");
   }
@@ -313,8 +308,11 @@ namespace alc
     // Clear the timer event.
     m_pmic.TimerClearEvent();
 
-    // Visual indication.
-    m_led.SetColour(LedColours::BLUE);
+    // Initialise network hardware for heartbeat.
+    if (!initNetworkHardware()) {
+      LOG_ERR("Network init failed for heartbeat!");
+      return;
+    }
 
     // Connect and send heartbeat (also sends any buffered events).
     if (connectToCloud()) {
@@ -330,11 +328,7 @@ namespace alc
       disconnectFromCloud();
     } else {
       LOG_ERR("Failed to connect for heartbeat!");
-      m_led.SetColour(LedColours::RED);
-      k_msleep(500);
     }
-
-    m_led.SetColour(LedColours::OFF);
 
     // TODO: Restart timer for next heartbeat (24 hours).
     // For now, heartbeat timer is not implemented.
@@ -354,10 +348,6 @@ namespace alc
     // For now, just log and return to sleep.
 
     LOG_INF("Hall sensor wake not yet implemented.");
-
-    m_led.SetColour(LedColours::ORANGE);
-    k_msleep(200);
-    m_led.SetColour(LedColours::OFF);
   }
 
   // ========== Fresh Boot Handler ==========
@@ -367,11 +357,6 @@ namespace alc
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║           FRESH BOOT / RESET           ║");
     LOG_INF("╚════════════════════════════════════════╝");
-
-    // Visual indication - blue pulse.
-    m_led.SetColour(LedColours::BLUE);
-    k_msleep(500);
-    m_led.SetColour(LedColours::OFF);
 
     // =========================================================================
     // Initialise timer state: Run short timer and wait for expiry
@@ -1039,9 +1024,12 @@ namespace alc
 
   void App::shutdownModem()
   {
-    LOG_INF("Shutting down modem...");
-    m_modem.Disconnect();
-    LOG_INF("Modem shutdown complete.");
+    // Only shutdown if network was initialised (CLOSE events, heartbeat, etc.)
+    if (m_networkInitialised) {
+      LOG_INF("Shutting down modem...");
+      m_modem.Disconnect();
+      LOG_INF("Modem shutdown complete.");
+    }
   }
 
   void App::enterSystemOff()

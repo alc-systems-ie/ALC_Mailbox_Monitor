@@ -32,7 +32,6 @@
 #include <zephyr/device.h>
 
 #include "adxl367.hpp"
-#include "led.hpp"
 #include "modem.hpp"
 #include "mqtt.hpp"
 #include "npm1300.hpp"
@@ -172,10 +171,20 @@ namespace alc
       // ========== Hardware Initialisation ==========
 
       /**
-       * @brief Initialise all hardware subsystems.
+       * @brief Initialise essential hardware (PMIC, accelerometer).
+       *
+       * This is the minimal init needed for OPEN events.
        * @return true on success.
        */
       bool initHardware();
+
+      /**
+       * @brief Initialise network hardware (modem, MQTT).
+       *
+       * Called lazily on CLOSE events when network access is needed.
+       * @return true on success.
+       */
+      bool initNetworkHardware();
 
       // ========== MQTT Operations ==========
 
@@ -297,7 +306,6 @@ namespace alc
 
       // ========== Hardware Objects ==========
 
-      Led m_led;
       Modem m_modem;
       Adxl367 m_motion;
       MqttClient m_mqtt;
@@ -306,6 +314,9 @@ namespace alc
       // ========== Runtime State ==========
 
       MailboxConfig m_config;
+
+      // Track if network hardware has been initialised.
+      bool m_networkInitialised { false };
 
       // Boot counter for debugging.
       uint32_t m_boot_count;
