@@ -256,7 +256,15 @@ When sending multiple buffered events (catch-up after outage):
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `event` | string | Always `"mail_delivered"` |
+| `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
+| `owner_intervened` | bool | `true` suppresses SMS notification |
+
 The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
+
+**Note on `owner_intervened`:** When catching up after connectivity outage, older buffered events are sent with `owner_intervened: true` to prevent SMS flood. Only the most recent event uses the actual value.
 
 ### Power Budget
 
