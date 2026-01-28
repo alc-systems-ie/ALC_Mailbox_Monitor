@@ -286,6 +286,56 @@ The GPIO latch only captures **rising edges**. Before entering System OFF, the f
 
 See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
 
+### FIFO-Based Motion Analysis (WIP)
+
+**Branch:** `feature/orientation-detection`
+
+The ADXL367 FIFO captures motion data *before* the MCU boots, solving the fast-delivery problem where open-to-close happens within the ~700ms boot time (too fast for two separate wake events).
+
+**Configuration:**
+- FIFO mode: Stream (always contains most recent data)
+- Channels: XYZ only
+- Wake-up rate: 12.5 SPS (80ms per sample)
+- FIFO read register: 0x18 (I2C_FIFO_DATA), bulk read
+
+**FIFO Data Format (different from data registers):**
+- 16 bits per sample: D[15:14] = channel ID, D[13:0] = signed 14-bit data
+- Data register format (ReadAxes) uses H[7:0]=D[13:6], L[7:2]=D[5:0] — NOT interchangeable
+- Samples arrive in X, Y, Z order (3 samples per XYZ set)
+
+**Three-Way Event Classification:**
+
+During each wake, FIFO samples are analysed against a "home" position to classify the event:
+
+| Classification | Condition | Action |
+|---------------|-----------|--------|
+| Spurious bump | < 6 consecutive samples away from home | Ignore |
+| Mail delivery | ≥ 6 consecutive away + returned home | Send notification |
+| Door left open | ≥ 6 consecutive away + NOT at home | TBD |
+
+- "Away from home" = Y or Z deviation > activity threshold (250mg) from home position
+- 6 samples at 12.5 SPS ≈ 500ms of sustained displacement
+- Home position currently set for flat testing: Y=0mg, Z=-1000mg (gravity)
+- Tolerance uses the configurable activity threshold (250mg default)
+
+**Testing Results (flat orientation):**
+- Bump: 0/13 away, significant_motion=NO, atHome=YES → correctly ignored
+- Open/close: 12/21 away, significant_motion=YES, atHome=YES → correctly detected
+
+**Known Issues / Quirks:**
+- `FIFO_ENTRIES` register reports 512 (full capacity), not valid sample count; zero-filtering used instead
+- STATUS register is at 0x0B (was incorrectly coded as 0x11/YDATA_L — fixed in commit 25ad5ac)
+- Wake-up mode samples at wake-up rate (12.5 SPS), not ODR, even after activity detection
+- Disabling wake-up mode mid-measurement doesn't change rate and causes INT1 glitch on re-enable
+- `mail_delivered` MQTT publish currently suppressed for testing
+
+**TODO:**
+- Handle "door left open" case (case 3)
+- Wire classification into OPEN/CLOSE state machine to suppress spurious events
+- Adjust HOME_Y/HOME_Z for actual mounted orientation
+- Re-enable MQTT publish when logic is finalised
+- Main stack increased to 8K for analysis buffers — review if this can be reduced
+
 ### Event Buffering (NVS Flash)
 
 Mail delivery events are buffered in NVS flash when network connectivity fails. This ensures events aren't lost during outages and decouples the state machine from connectivity status.
