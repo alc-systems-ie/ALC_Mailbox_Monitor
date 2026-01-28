@@ -35,8 +35,7 @@
 #include "modem.hpp"
 #include "mqtt.hpp"
 #include "npm1300.hpp"
-#include "retained.hpp"
-#include "orientation.hpp"
+// #include "retained.hpp"
 
 namespace alc
 {
@@ -154,22 +153,6 @@ namespace alc
        * - Timer running → CLOSE event → stop timer, send MQTT
        */
       void handleMotionWake();
-
-      /**
-       * @brief Handle motion wake using orientation-based detection.
-       *
-       * EXPERIMENTAL: Alternative to timer-based open/close detection.
-       * Continuously samples accelerometer during awake period to detect
-       * door position based on orientation change from closed reference.
-       *
-       * Advantages:
-       * - Handles fast open/close cycles (no need to return to System OFF)
-       * - More robust detection based on actual door position
-       * - Single wake cycle handles complete open→close sequence
-       *
-       * This method is enabled by USE_ORIENTATION_DETECTION define.
-       */
-      void handleMotionWakeOrientation();
 
       /**
        * @brief Handle timer wake - nightly heartbeat (future).
@@ -343,10 +326,6 @@ namespace alc
       Adxl367 m_motion;
       MqttClient m_mqtt;
       Npm1300 m_pmic;
-
-      // ========== Experimental Orientation Detection ==========
-
-      OrientationDetector m_orientationDetector;
 
       // ========== Runtime State ==========
 

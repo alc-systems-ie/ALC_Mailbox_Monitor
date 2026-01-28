@@ -63,6 +63,15 @@ namespace alc
         Rate1_5Sps = 3    ///< 1.5 samples/sec (lowest power).
       };
 
+      enum class ODR : uint8_t {
+        Hz12_5 = 0,   ///< 12.5 Hz.
+        Hz25   = 1,   ///< 25 Hz.
+        Hz50   = 2,   ///< 50 Hz.
+        Hz100  = 3,   ///< 100 Hz.
+        Hz200  = 4,   ///< 200 Hz.
+        Hz400  = 5    ///< 400 Hz.
+      };
+
       enum class IntPin : uint8_t {
         Int1 = 1,
         Int2 = 2
@@ -78,20 +87,6 @@ namespace alc
         bool activityDetected;   ///< Activity detected.
         bool inactivityDetected; ///< Inactivity detected.
         bool awake;              ///< Device is in awake state.
-      };
-
-      /**
-       * @brief Acceleration data for all three axes.
-       *
-       * Values are in milli-g (mg), sign-extended from 14-bit ADC values.
-       * At ±2g range: 0.25 mg/LSB, max ±8192 mg
-       * At ±4g range: 0.5 mg/LSB, max ±16384 mg
-       * At ±8g range: 1.0 mg/LSB, max ±32768 mg
-       */
-      struct AxisData {
-        int16_t x;  ///< X-axis acceleration in mg.
-        int16_t y;  ///< Y-axis acceleration in mg.
-        int16_t z;  ///< Z-axis acceleration in mg.
       };
 
       /**
@@ -183,6 +178,13 @@ namespace alc
       int SetRange(Range range);
 
       /**
+       * @brief Set output data rate.
+       * @param odr Output data rate.
+       * @return 0 on success, negative error code on failure.
+       */
+      int SetOdr(ODR odr);
+
+      /**
        * @brief Configure activity/inactivity detection.
        * 
        * This is the main configuration for mailbox motion detection.
@@ -223,17 +225,6 @@ namespace alc
        * @return True if awake (motion detected).
        */
       bool IsAwake();
-
-      /**
-       * @brief Read acceleration data from all three axes.
-       *
-       * Reads the 14-bit acceleration values and converts to milli-g
-       * based on the current range setting.
-       *
-       * @param data Reference to AxisData structure to fill.
-       * @return 0 on success, negative error code on failure.
-       */
-      int ReadAxes(AxisData& data);
 
       // ========== Threshold Updates (for MQTT tuning) ==========
 

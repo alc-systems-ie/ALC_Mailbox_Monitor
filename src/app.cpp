@@ -9,13 +9,6 @@
 
 LOG_MODULE_REGISTER(application, LOG_LEVEL_INF);
 
-// ============================================================================
-// EXPERIMENTAL: Enable orientation-based door detection.
-// When defined, motion wake uses continuous axis sampling instead of
-// timer-based two-event detection.
-// ============================================================================
-#define USE_ORIENTATION_DETECTION
-
 namespace alc
 {
   // ========== I2C Device ==========
@@ -46,7 +39,6 @@ namespace alc
       , m_motion(i2c_dev, Adxl367::I2cAddress::AddrLow)
       , m_mqtt(*this)
       , m_pmic { DEVICE_DT_GET(DT_NODELABEL(pmic_main)), DEVICE_DT_GET(DT_NODELABEL(npm1300_charger)) }
-      , m_orientationDetector(m_motion)
       , m_boot_count(0)
   {
     s_instance = this;
@@ -84,11 +76,7 @@ namespace alc
     // =========================================================================
     switch (wake) {
       case WakeSource::Accelerometer:
-#ifdef USE_ORIENTATION_DETECTION
-        handleMotionWakeOrientation();
-#else
         handleMotionWake();
-#endif
         break;
 
       case WakeSource::Timer:
@@ -319,136 +307,6 @@ namespace alc
     }
 
     LOG_INF("Motion wake handling complete.");
-  }
-
-  // ========== Orientation-Based Motion Wake Handler (Experimental) ==========
-
-  void App::handleMotionWakeOrientation()
-  {
-    LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║  MOTION WAKE (ORIENTATION DETECTION)   ║");
-    LOG_INF("╚════════════════════════════════════════╝");
-
-    // =========================================================================
-    // Check if device is enabled for normal operation.
-    // =========================================================================
-    if (!isEnabled()) {
-      LOG_INF("Device disabled - entering provisioning mode.");
-      handleProvisioningMode();
-      // Does not return.
-    }
-
-    // =========================================================================
-    // Initialise orientation detector if not calibrated.
-    // =========================================================================
-    if (!m_orientationDetector.IsCalibrated()) {
-      LOG_INF("Orientation detector not calibrated - initialising...");
-      m_orientationDetector.Init();
-
-      // OPTIMISATION: In production, load reference from NVS here.
-      // For now, we'll auto-calibrate on first wake (assumes door is closed).
-      // This is a fallback - proper calibration should be done during provisioning.
-    }
-
-    // =========================================================================
-    // Run detection cycle - this samples continuously until:
-    // - Door opens and closes (MailDelivered)
-    // - Door left open too long (DoorLeftOpen)
-    // - No significant movement (SpuriousMotion)
-    // - First run calibration (CalibrationDone)
-    // =========================================================================
-    LOG_INF("Starting orientation detection cycle...");
-    LOG_INF("Config: open=%dmg, close=%dmg, stable=%dms, timeout=%ds",
-            DEFAULT_ORIENTATION_CONFIG.openThresholdMg,
-            DEFAULT_ORIENTATION_CONFIG.closeThresholdMg,
-            DEFAULT_ORIENTATION_CONFIG.stableTimeMs,
-            DEFAULT_ORIENTATION_CONFIG.maxOpenTimeoutSecs);
-
-    // Start nPM1300 timer as backup timeout (in case detection logic fails).
-    // This ensures we don't get stuck sampling forever.
-    m_pmic.TimerClearEvent();
-    m_pmic.TimerSetDuration(DEFAULT_ORIENTATION_CONFIG.maxOpenTimeoutSecs);
-    m_pmic.TimerStart();
-    LOG_INF("Backup timer started: %d seconds.", DEFAULT_ORIENTATION_CONFIG.maxOpenTimeoutSecs);
-
-    OrientationResult result = m_orientationDetector.RunDetectionCycle();
-
-    // Stop backup timer.
-    m_pmic.TimerStop();
-
-    // =========================================================================
-    // Log detection statistics for analysis.
-    // =========================================================================
-    const OrientationStats& stats = m_orientationDetector.GetLastStats();
-    LOG_INF("════════════════════════════════════════");
-    LOG_INF("DETECTION CYCLE COMPLETE");
-    LOG_INF("────────────────────────────────────────");
-    LOG_INF("Result:        %s",
-            result == OrientationResult::MailDelivered ? "MAIL_DELIVERED" :
-            result == OrientationResult::DoorLeftOpen ? "DOOR_LEFT_OPEN" :
-            result == OrientationResult::SpuriousMotion ? "SPURIOUS_MOTION" :
-            result == OrientationResult::CalibrationDone ? "CALIBRATION_DONE" : "ERROR");
-    LOG_INF("Duration:      %u ms", stats.durationMs);
-    LOG_INF("Samples:       %u", stats.sampleCount);
-    LOG_INF("Max deviation: %d mg", stats.maxDeviationMg);
-    LOG_INF("X range:       %d to %d mg", stats.minX, stats.maxX);
-    LOG_INF("Y range:       %d to %d mg", stats.minY, stats.maxY);
-    LOG_INF("Z range:       %d to %d mg", stats.minZ, stats.maxZ);
-    LOG_INF("Open detected: %s", stats.openDetected ? "YES" : "NO");
-    LOG_INF("Close detected: %s", stats.closeDetected ? "YES" : "NO");
-    LOG_INF("════════════════════════════════════════");
-
-    // =========================================================================
-    // Handle detection result.
-    // =========================================================================
-    switch (result) {
-      case OrientationResult::MailDelivered:
-        LOG_INF("╔════════════════════════════════════════╗");
-        LOG_INF("║         MAIL DELIVERED!                ║");
-        LOG_INF("╚════════════════════════════════════════╝");
-        {
-          uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-          bool ownerIntervened = false;  // Placeholder for Hall sensor.
-
-          // Buffer the event first.
-          bufferMailEvent(timestamp, ownerIntervened);
-
-          // Initialise network and send.
-          if (initNetworkHardware() && connectToCloud()) {
-            sendBufferedEvents();
-            sendBatteryStatus();
-            collectMqttCommands();
-            disconnectFromCloud();
-          } else {
-            LOG_ERR("Network failed - event buffered for later.");
-            LOG_INF("Buffered events: %d", getBufferedEventCount());
-          }
-        }
-        break;
-
-      case OrientationResult::DoorLeftOpen:
-        LOG_WRN("Door left open - no mail delivery event sent.");
-        // OPTIMISATION: Could send a "door_left_open" event for monitoring.
-        // For now, just log and return to sleep.
-        break;
-
-      case OrientationResult::SpuriousMotion:
-        LOG_INF("Spurious motion - no significant door movement.");
-        // Normal case for vibrations, wind, etc. Just return to sleep.
-        break;
-
-      case OrientationResult::CalibrationDone:
-        LOG_INF("Calibration completed on first wake.");
-        // OPTIMISATION: Save reference to NVS here.
-        // Next wake will use the calibrated reference.
-        break;
-
-      case OrientationResult::Error:
-        LOG_ERR("Detection cycle error!");
-        break;
-    }
-
-    LOG_INF("Orientation-based motion wake handling complete.");
   }
 
   // ========== Timer Wake Handler ==========
@@ -1255,11 +1113,12 @@ namespace alc
 
     LOG_INF("Configuring ADXL367 for motion wake-up...");
 
-    // Put in standby for configuration.
-    result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Standby);
-    if (result < 0) { return result; }
+    // Device is in Standby after Init() soft reset.
+    // All register changes (0x00-0x2D) must be made in Standby per datasheet.
 
-    // Configure activity detection using current config values.
+    // Datasheet configuration sequence (registers 0x20-0x2D):
+    // 1. Activity/inactivity thresholds and timers (0x20-0x26).
+    // 2. Activity/inactivity control (0x27).
     Adxl367::ActivityConfig actConfig {
       .activityMode = Adxl367::ActivityMode::Referenced,
       .inactivityMode = Adxl367::ActivityMode::Absolute,
@@ -1277,19 +1136,24 @@ namespace alc
     result = m_motion.ConfigureActivity(actConfig);
     if (result < 0) { return result; }
 
-    // Map AWAKE signal to INT1 (active high for System OFF wake).
+    // 3. FIFO (0x28-0x29) - not used yet.
+
+    // 4. Interrupt mapping (0x2A-0x2B).
     result = m_motion.ConfigureInterrupt(Adxl367::IntPin::Int1, true, false);
     if (result < 0) { return result; }
 
-    // Set range.
+    // 5. Filter control (0x2C) - range and ODR.
     result = m_motion.SetRange(Adxl367::Range::Range2g);
     if (result < 0) { return result; }
 
-    // Enable wake-up mode (180 nA operation).
+    result = m_motion.SetOdr(Adxl367::ODR::Hz50);
+    if (result < 0) { return result; }
+
+    // 6. Power control (0x2D) - enter measurement mode.
+    //    Enable wake-up mode first, then start measurement.
     result = m_motion.EnableWakeupMode(Adxl367::WakeupRate::Rate6Sps);
     if (result < 0) { return result; }
 
-    // Enter measurement mode.
     result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Measurement);
     if (result < 0) { return result; }
 

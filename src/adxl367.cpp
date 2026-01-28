@@ -20,16 +20,8 @@ namespace alc {
     constexpr uint8_t DEVID_MST_VALUE { 0x1D };
     constexpr uint8_t PART_ID_VALUE   { 0xF7 };
     
-    // Data registers (14-bit, upper 8 bits in _H, lower 6 in _L[7:2]).
-    constexpr uint8_t XDATA_H         { 0x0E };
-    constexpr uint8_t XDATA_L         { 0x0F };
-    constexpr uint8_t YDATA_H         { 0x10 };
-    constexpr uint8_t YDATA_L         { 0x11 };
-    constexpr uint8_t ZDATA_H         { 0x12 };
-    constexpr uint8_t ZDATA_L         { 0x13 };
-
     // Status register.
-    constexpr uint8_t STATUS          { 0x0B };
+    constexpr uint8_t STATUS          { 0x11 };
     constexpr uint8_t STATUS_DATA_READY_MASK  { 0x01 };
     constexpr uint8_t STATUS_ACT_MASK         { 0x10 };
     constexpr uint8_t STATUS_INACT_MASK       { 0x20 };
@@ -54,6 +46,7 @@ namespace alc {
     constexpr uint8_t FILTER_CTL      { 0x2C };
     constexpr uint8_t RANGE_SHIFT     { 6 };
     constexpr uint8_t RANGE_MASK      { 0xC0 };
+    constexpr uint8_t ODR_MASK        { 0x07 };
     
     // Power control.
     constexpr uint8_t POWER_CTL       { 0x2D };
@@ -268,6 +261,19 @@ namespace alc {
     return 0;
   }
 
+  int Adxl367::SetOdr(ODR odr)
+  {
+    int result { updateRegister(reg::FILTER_CTL, static_cast<uint8_t>(odr), reg::ODR_MASK) };
+    if (result < 0) {
+      LOG_ERR("Failed to set ODR: %d!", result);
+      return result;
+    }
+
+    const char* odrStr[] { "12.5Hz", "25Hz", "50Hz", "100Hz", "200Hz", "400Hz" };
+    LOG_INF("ODR set to %s.", odrStr[static_cast<uint8_t>(odr)]);
+    return 0;
+  }
+
   int Adxl367::ConfigureActivity(const ActivityConfig& config)
   {
     int result;
@@ -326,8 +332,7 @@ namespace alc {
       return result;
     }
 
-    LOG_INF("INT%d configured: AWAKE=%d, ActiveLow=%d.",
-            static_cast<uint8_t>(pin), awake, activeLow);
+    LOG_INF("INT%d configured: AWAKE=%d, ActiveLow=%d.", static_cast<uint8_t>(pin), awake, activeLow);
     return 0;
   }
 
@@ -357,42 +362,6 @@ namespace alc {
       return true;  // Default to awake on error (safer).
     }
     return status.awake;
-  }
-
-  int Adxl367::ReadAxes(AxisData& data)
-  {
-    // Read all 6 bytes in a single burst read for consistency.
-    uint8_t regAddr { reg::XDATA_H };
-    uint8_t buffer[6];
-
-    int result { i2c_write_read(m_i2c, m_i2cAddr, &regAddr, 1, buffer, sizeof(buffer)) };
-    if (result < 0) {
-      LOG_ERR("Failed to read axis data: %d!", result);
-      return result;
-    }
-
-    // Combine bytes into 14-bit signed values.
-    // Format: H[7:0] = D[13:6], L[7:2] = D[5:0], L[1:0] = unused.
-    auto combine14bit = [](uint8_t h, uint8_t l) -> int16_t {
-      int16_t raw { static_cast<int16_t>((static_cast<uint16_t>(h) << 6) | (l >> 2)) };
-      // Sign-extend from 14-bit to 16-bit.
-      if (raw & 0x2000) {
-        raw |= 0xC000;
-      }
-      return raw;
-    };
-
-    int16_t rawX { combine14bit(buffer[0], buffer[1]) };
-    int16_t rawY { combine14bit(buffer[2], buffer[3]) };
-    int16_t rawZ { combine14bit(buffer[4], buffer[5]) };
-
-    // Convert to milli-g using current range scale factor.
-    float scale { getScaleFactor() };
-    data.x = static_cast<int16_t>(static_cast<float>(rawX) * scale);
-    data.y = static_cast<int16_t>(static_cast<float>(rawY) * scale);
-    data.z = static_cast<int16_t>(static_cast<float>(rawZ) * scale);
-
-    return 0;
   }
 
   // ========== Threshold Updates ==========
