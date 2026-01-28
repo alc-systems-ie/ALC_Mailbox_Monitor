@@ -235,6 +235,79 @@ namespace alc
     LOG_INF("  Mail window:   %u seconds", m_config.mailWindowSecs);
     LOG_INF("────────────────────────────────────────");
 
+    // =========================================================================
+    // FIFO polling: read accelerometer FIFO while AWAKE, log summary at end.
+    // =========================================================================
+    {
+      constexpr uint16_t FIFO_MAX_SETS { 30 };  // Read in small batches.
+      constexpr uint32_t POLL_INTERVAL_MS { 100 };
+      constexpr uint32_t FIFO_TIMEOUT_MS { 15000 };
+
+      // Track totals across all reads.
+      uint32_t totalSets { 0 };
+      int16_t lastY { 0 };
+      int16_t lastZ { 0 };
+      int64_t awakeStartTime { k_uptime_get() };
+
+      LOG_INF("FIFO: Starting read loop (polling AWAKE)...");
+
+      // Allocate sample buffer once.
+      Adxl367::FifoSample fifoBuffer[FIFO_MAX_SETS];
+
+      while (true) {
+        uint32_t elapsed { static_cast<uint32_t>(k_uptime_get() - awakeStartTime) };
+
+        // Read whatever is in the FIFO.
+        uint16_t setsRead { 0 };
+        int fifoResult { m_motion.ReadFifo(fifoBuffer, FIFO_MAX_SETS, setsRead) };
+
+        if (fifoResult == 0 && setsRead > 0) {
+          totalSets += setsRead;
+          // Keep track of the last sample for "at home" check.
+          lastY = fifoBuffer[setsRead - 1].y;
+          lastZ = fifoBuffer[setsRead - 1].z;
+          LOG_INF("FIFO: +%u sets (total=%u), last Y=%d Z=%d mg, t=%u ms",
+                  setsRead, totalSets, lastY, lastZ, elapsed);
+        }
+
+        // Check if AWAKE has cleared.
+        if (!m_motion.IsAwake()) {
+          LOG_INF("FIFO: AWAKE cleared after %u ms.", elapsed);
+          break;
+        }
+
+        // Timeout protection.
+        if (elapsed >= FIFO_TIMEOUT_MS) {
+          LOG_WRN("FIFO: Timeout (%u ms) - AWAKE still HIGH.", FIFO_TIMEOUT_MS);
+          break;
+        }
+
+        k_msleep(POLL_INTERVAL_MS);
+      }
+
+      // Final FIFO drain after AWAKE cleared.
+      uint16_t finalSets { 0 };
+      m_motion.ReadFifo(fifoBuffer, FIFO_MAX_SETS, finalSets);
+      if (finalSets > 0) {
+        totalSets += finalSets;
+        lastY = fifoBuffer[finalSets - 1].y;
+        lastZ = fifoBuffer[finalSets - 1].z;
+        LOG_INF("FIFO: Final drain +%u sets (total=%u).", finalSets, totalSets);
+      }
+
+      // "At home" check: Y≈1000mg, Z≈0mg, both ±100mg.
+      bool atHome { (lastY >= 900 && lastY <= 1100) && (lastZ >= -100 && lastZ <= 100) };
+
+      uint32_t awakeDuration { static_cast<uint32_t>(k_uptime_get() - awakeStartTime) };
+      LOG_INF("────────────────────────────────────────");
+      LOG_INF("FIFO SUMMARY:");
+      LOG_INF("  Total sample sets: %u", totalSets);
+      LOG_INF("  Awake duration:    %u ms", awakeDuration);
+      LOG_INF("  Last Y: %d mg, Last Z: %d mg", lastY, lastZ);
+      LOG_INF("  At home: %s", atHome ? "YES" : "NO");
+      LOG_INF("────────────────────────────────────────");
+    }
+
     if (timerExpired) {
       // ===== OPEN EVENT (or timeout/spurious) =====
       LOG_INF("╔════════════════════════════════════════╗");
@@ -643,10 +716,12 @@ namespace alc
 
     LOG_INF("Sending mail delivered event: %s", message);
 
-    if (!m_mqtt.Publish(topic, message, len, false)) {
-      LOG_ERR("Failed to publish mail event!");
-      return false;
-    }
+    // TODO: Re-enable when FIFO testing complete.
+    // if (!m_mqtt.Publish(topic, message, len, false)) {
+    //   LOG_ERR("Failed to publish mail event!");
+    //   return false;
+    // }
+    LOG_INF("(MQTT publish suppressed for FIFO testing)");
 
     return true;
   }
@@ -1136,7 +1211,9 @@ namespace alc
     result = m_motion.ConfigureActivity(actConfig);
     if (result < 0) { return result; }
 
-    // 3. FIFO (0x28-0x29) - not used yet.
+    // 3. FIFO (0x28-0x29) - stream mode, XYZ channels.
+    result = m_motion.ConfigureFifo(Adxl367::FifoMode::Stream);
+    if (result < 0) { return result; }
 
     // 4. Interrupt mapping (0x2A-0x2B).
     result = m_motion.ConfigureInterrupt(Adxl367::IntPin::Int1, true, false);
@@ -1151,7 +1228,7 @@ namespace alc
 
     // 6. Power control (0x2D) - enter measurement mode.
     //    Enable wake-up mode first, then start measurement.
-    result = m_motion.EnableWakeupMode(Adxl367::WakeupRate::Rate6Sps);
+    result = m_motion.EnableWakeupMode(Adxl367::WakeupRate::Rate12Sps);
     if (result < 0) { return result; }
 
     result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Measurement);

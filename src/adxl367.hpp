@@ -11,7 +11,6 @@
  * - MQTT-configurable thresholds
  * 
  * Removed features not needed for mailbox monitoring:
- * - FIFO buffering
  * - Tap detection
  * - Temperature sensing
  * - Data streaming
@@ -72,6 +71,13 @@ namespace alc
         Hz400  = 5    ///< 400 Hz.
       };
 
+      enum class FifoMode : uint8_t {
+        Disabled    = 0,  ///< FIFO disabled.
+        OldestSaved = 1,  ///< Fills then stops.
+        Stream      = 2,  ///< Always contains most recent data.
+        Triggered   = 3   ///< Captures around activity event.
+      };
+
       enum class IntPin : uint8_t {
         Int1 = 1,
         Int2 = 2
@@ -87,6 +93,15 @@ namespace alc
         bool activityDetected;   ///< Activity detected.
         bool inactivityDetected; ///< Inactivity detected.
         bool awake;              ///< Device is in awake state.
+      };
+
+      /**
+       * @brief Single XYZ sample from FIFO (converted to mg).
+       */
+      struct FifoSample {
+        int16_t x;   ///< X-axis in mg.
+        int16_t y;   ///< Y-axis in mg.
+        int16_t z;   ///< Z-axis in mg.
       };
 
       /**
@@ -168,6 +183,12 @@ namespace alc
        */
       int EnableWakeupMode(WakeupRate rate = WakeupRate::Rate6Sps);
 
+      /**
+       * @brief Disable wake-up mode (switch to full ODR measurement).
+       * @return 0 on success, negative error code on failure.
+       */
+      int DisableWakeupMode();
+
       // ========== Configuration ==========
 
       /**
@@ -207,6 +228,37 @@ namespace alc
        * @return 0 on success, negative error code on failure.
        */
       int ConfigureInterrupt(IntPin pin, bool awake, bool activeLow = false);
+
+      // ========== FIFO ==========
+
+      /**
+       * @brief Configure FIFO mode and channel selection.
+       * @param mode FIFO operating mode.
+       * @param storeXyz Store X, Y, Z channels (the only option we use).
+       * @return 0 on success, negative error code on failure.
+       */
+      int ConfigureFifo(FifoMode mode);
+
+      /**
+       * @brief Read number of samples currently in FIFO.
+       * @param entries Reference to store the count.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadFifoEntries(uint16_t& entries);
+
+      /**
+       * @brief Read all available FIFO data as XYZ sample sets.
+       *
+       * Reads FIFO_ENTRIES, then bulk-reads from I2C_FIFO_DATA (0x18).
+       * Each sample is 2 bytes: D[15:14]=channel ID, D[13:0]=signed 14-bit data.
+       * Samples arrive in X, Y, Z order (3 samples per set).
+       *
+       * @param samples Output buffer for decoded XYZ samples.
+       * @param maxSets Maximum number of XYZ sets the buffer can hold.
+       * @param setsRead Number of complete XYZ sets actually read.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadFifo(FifoSample* samples, uint16_t maxSets, uint16_t& setsRead);
 
       // ========== Status ==========
 
@@ -268,6 +320,7 @@ namespace alc
       int writeRegister(uint8_t reg, uint8_t value);
       int readRegister(uint8_t reg, uint8_t& value);
       int updateRegister(uint8_t reg, uint8_t value, uint8_t mask);
+      int readBurst(uint8_t reg, uint8_t* buffer, uint16_t length);
 
       // Conversion helpers.
       uint16_t mgToThreshold(uint16_t mg);

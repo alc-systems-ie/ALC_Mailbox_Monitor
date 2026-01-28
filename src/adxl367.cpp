@@ -21,7 +21,7 @@ namespace alc {
     constexpr uint8_t PART_ID_VALUE   { 0xF7 };
     
     // Status register.
-    constexpr uint8_t STATUS          { 0x11 };
+    constexpr uint8_t STATUS          { 0x0B };
     constexpr uint8_t STATUS_DATA_READY_MASK  { 0x01 };
     constexpr uint8_t STATUS_ACT_MASK         { 0x10 };
     constexpr uint8_t STATUS_INACT_MASK       { 0x20 };
@@ -42,6 +42,16 @@ namespace alc {
     constexpr uint8_t INACT_EN_SHIFT  { 2 };
     constexpr uint8_t LINKLOOP_SHIFT  { 4 };
     
+    // FIFO.
+    constexpr uint8_t FIFO_ENTRIES_H  { 0x0C };
+    constexpr uint8_t FIFO_ENTRIES_L  { 0x0D };
+    constexpr uint8_t I2C_FIFO_DATA   { 0x18 };
+    constexpr uint8_t FIFO_CONTROL    { 0x28 };
+    constexpr uint8_t FIFO_SAMPLES    { 0x29 };
+    constexpr uint8_t FIFO_MODE_MASK  { 0x03 };
+    constexpr uint8_t FIFO_CHANNEL_SHIFT { 3 };
+    // CHANNEL_SELECT=0x0 stores X, Y, Z (default).
+
     // Filter control.
     constexpr uint8_t FILTER_CTL      { 0x2C };
     constexpr uint8_t RANGE_SHIFT     { 6 };
@@ -242,6 +252,18 @@ namespace alc {
     return 0;
   }
 
+  int Adxl367::DisableWakeupMode()
+  {
+    int result { updateRegister(reg::POWER_CTL, 0, reg::WAKEUP_MASK) };
+    if (result < 0) {
+      LOG_ERR("Failed to disable wake-up mode: %d!", result);
+      return result;
+    }
+
+    LOG_INF("Wake-up mode disabled (full ODR active).");
+    return 0;
+  }
+
   // ========== Configuration ==========
 
   int Adxl367::SetRange(Range range)
@@ -273,6 +295,132 @@ namespace alc {
     LOG_INF("ODR set to %s.", odrStr[static_cast<uint8_t>(odr)]);
     return 0;
   }
+
+  // ========== FIFO ==========
+
+  int Adxl367::ConfigureFifo(FifoMode mode)
+  {
+    // FIFO_CONTROL (0x28): CHANNEL_SELECT[6:3]=0x0 (XYZ), FIFO_MODE[1:0].
+    uint8_t value { static_cast<uint8_t>(mode) };
+    int result { writeRegister(reg::FIFO_CONTROL, value) };
+    if (result < 0) {
+      LOG_ERR("Failed to configure FIFO: %d!", result);
+      return result;
+    }
+
+    // FIFO_SAMPLES (0x29): Set to 0 (no watermark threshold needed).
+    result = writeRegister(reg::FIFO_SAMPLES, 0);
+    if (result < 0) {
+      LOG_ERR("Failed to set FIFO samples: %d!", result);
+      return result;
+    }
+
+    const char* modeStr[] { "Disabled", "OldestSaved", "Stream", "Triggered" };
+    LOG_INF("FIFO configured: mode=%s, channels=XYZ.", modeStr[static_cast<uint8_t>(mode)]);
+    return 0;
+  }
+
+  int Adxl367::ReadFifoEntries(uint16_t& entries)
+  {
+    uint8_t hi { 0 };
+    uint8_t lo { 0 };
+
+    int result { readRegister(reg::FIFO_ENTRIES_H, hi) };
+    if (result < 0) { return result; }
+
+    result = readRegister(reg::FIFO_ENTRIES_L, lo);
+    if (result < 0) { return result; }
+
+    // FIFO_ENTRIES is 10-bit: H[1:0] are MSBs, L[7:0] are LSBs.
+    entries = static_cast<uint16_t>(((hi & 0x03) << 8) | lo);
+    return 0;
+  }
+
+  int Adxl367::ReadFifo(FifoSample* samples, uint16_t maxSets, uint16_t& setsRead)
+  {
+    setsRead = 0;
+
+    uint16_t entries { 0 };
+    int result { ReadFifoEntries(entries) };
+    if (result < 0) { return result; }
+
+    LOG_INF("FIFO_ENTRIES raw: %u", entries);
+
+    if (entries == 0) { return 0; }
+
+    // Each XYZ set = 3 entries. Each entry = 2 bytes (14-bit + ID format).
+    uint16_t availableSets { static_cast<uint16_t>(entries / 3) };
+    uint16_t setsToRead { (availableSets > maxSets) ? maxSets : availableSets };
+    uint16_t bytesToRead { static_cast<uint16_t>(setsToRead * 3 * 2) };
+
+    if (bytesToRead == 0) { return 0; }
+
+    // Bulk read from I2C_FIFO_DATA (0x18).
+    // Cap to keep stack usage reasonable.
+    constexpr uint16_t MAX_RAW_BYTES { 30 * 3 * 2 };  // 30 XYZ sets = 180 bytes.
+    uint8_t raw[MAX_RAW_BYTES];
+    if (bytesToRead > MAX_RAW_BYTES) {
+      setsToRead = MAX_RAW_BYTES / 6;
+      bytesToRead = static_cast<uint16_t>(setsToRead * 6);
+    }
+    result = readBurst(reg::I2C_FIFO_DATA, raw, bytesToRead);
+    if (result < 0) {
+      LOG_ERR("FIFO bulk read failed: %d!", result);
+      return result;
+    }
+
+    // Log first 6 raw bytes for format debugging.
+    if (bytesToRead >= 6) {
+      LOG_INF("FIFO raw[0..5]: %02X %02X %02X %02X %02X %02X",
+              raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+    }
+
+    // Decode FIFO samples.
+    // FIFO format (14-bit + ID): D[15:14]=channel ID, D[13:0]=signed 14-bit data.
+    // First byte is MSB, second byte is LSB.
+    float scale { getScaleFactor() };
+
+    for (uint16_t i = 0; i < setsToRead; ++i) {
+      for (uint8_t ch = 0; ch < 3; ++ch) {
+        uint16_t offset { static_cast<uint16_t>((i * 3 + ch) * 2) };
+        uint16_t raw16 { static_cast<uint16_t>((raw[offset] << 8) | raw[offset + 1]) };
+
+        // Extract 14-bit signed value (bits [13:0]).
+        int16_t rawVal { static_cast<int16_t>(raw16 & 0x3FFF) };
+        // Sign-extend from 14-bit.
+        if (rawVal & 0x2000) {
+          rawVal |= static_cast<int16_t>(0xC000);
+        }
+
+        int16_t mg { static_cast<int16_t>(static_cast<float>(rawVal) * scale) };
+
+        switch (ch) {
+          case 0: samples[i].x = mg; break;
+          case 1: samples[i].y = mg; break;
+          case 2: samples[i].z = mg; break;
+        }
+      }
+    }
+
+    // Count valid samples (stop at first all-zero set - gravity ensures at least one axis is non-zero).
+    uint16_t validSets { 0 };
+    for (uint16_t i = 0; i < setsToRead; ++i) {
+      if (samples[i].x == 0 && samples[i].y == 0 && samples[i].z == 0) {
+        break;
+      }
+      validSets = i + 1;
+      LOG_INF("FIFO[%u]: X=%d Y=%d Z=%d mg", i, samples[i].x, samples[i].y, samples[i].z);
+    }
+
+    if (validSets < setsToRead) {
+      LOG_INF("FIFO: %u valid of %u decoded (stopped at zero padding).", validSets, setsToRead);
+    }
+
+    setsRead = validSets;
+    return 0;
+  }
+
+  // ========== Activity/Inactivity ==========
 
   int Adxl367::ConfigureActivity(const ActivityConfig& config)
   {
@@ -462,6 +610,16 @@ namespace alc {
 
     uint8_t newValue { static_cast<uint8_t>((current & ~mask) | (value & mask)) };
     return writeRegister(reg, newValue);
+  }
+
+  int Adxl367::readBurst(uint8_t reg, uint8_t* buffer, uint16_t length)
+  {
+    int result { i2c_write_read(m_i2c, m_i2cAddr, &reg, 1, buffer, length) };
+    if (result < 0) {
+      LOG_ERR("I2C burst read failed: reg=0x%02X, len=%u, err=%d!", reg, length, result);
+      return result;
+    }
+    return 0;
   }
 
   // ========== Conversion Helpers ==========
