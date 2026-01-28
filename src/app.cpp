@@ -236,75 +236,114 @@ namespace alc
     LOG_INF("────────────────────────────────────────");
 
     // =========================================================================
-    // FIFO polling: read accelerometer FIFO while AWAKE, log summary at end.
+    // FIFO polling: read accelerometer FIFO while AWAKE, analyse at end.
     // =========================================================================
     {
-      constexpr uint16_t FIFO_MAX_SETS { 30 };  // Read in small batches.
+      constexpr uint16_t FIFO_BATCH { 30 };       // Read batch size.
+      constexpr uint16_t FIFO_TOTAL_MAX { 120 };   // Max samples to accumulate.
       constexpr uint32_t POLL_INTERVAL_MS { 100 };
       constexpr uint32_t FIFO_TIMEOUT_MS { 15000 };
 
-      // Track totals across all reads.
-      uint32_t totalSets { 0 };
-      int16_t lastY { 0 };
-      int16_t lastZ { 0 };
+      // Home position (flat on table for testing; adjust for mounted orientation).
+      constexpr int16_t HOME_Y { 0 };     // mg.
+      constexpr int16_t HOME_Z { -1000 }; // mg - gravity on Z when flat.
+      // Use activity threshold as the tolerance - deviations smaller than this
+      // are what triggered wake-up mode in the first place.
+      int16_t homeTolerance { static_cast<int16_t>(m_config.activityThresholdMg) }; // 250mg default.
+
+      // Accumulate all valid samples.
+      Adxl367::FifoSample allSamples[FIFO_TOTAL_MAX];
+      uint16_t totalSets { 0 };
       int64_t awakeStartTime { k_uptime_get() };
 
       LOG_INF("FIFO: Starting read loop (polling AWAKE)...");
 
-      // Allocate sample buffer once.
-      Adxl367::FifoSample fifoBuffer[FIFO_MAX_SETS];
+      // Temp buffer for each read.
+      Adxl367::FifoSample batch[FIFO_BATCH];
+
+      auto readAndAccumulate = [&]() {
+        uint16_t setsRead { 0 };
+        int result { m_motion.ReadFifo(batch, FIFO_BATCH, setsRead) };
+        if (result == 0 && setsRead > 0) {
+          for (uint16_t i = 0; i < setsRead && totalSets < FIFO_TOTAL_MAX; ++i) {
+            allSamples[totalSets++] = batch[i];
+          }
+        }
+      };
 
       while (true) {
         uint32_t elapsed { static_cast<uint32_t>(k_uptime_get() - awakeStartTime) };
 
-        // Read whatever is in the FIFO.
-        uint16_t setsRead { 0 };
-        int fifoResult { m_motion.ReadFifo(fifoBuffer, FIFO_MAX_SETS, setsRead) };
+        readAndAccumulate();
 
-        if (fifoResult == 0 && setsRead > 0) {
-          totalSets += setsRead;
-          // Keep track of the last sample for "at home" check.
-          lastY = fifoBuffer[setsRead - 1].y;
-          lastZ = fifoBuffer[setsRead - 1].z;
-          LOG_INF("FIFO: +%u sets (total=%u), last Y=%d Z=%d mg, t=%u ms",
-                  setsRead, totalSets, lastY, lastZ, elapsed);
+        if (totalSets > 0) {
+          LOG_INF("FIFO: %u sets, t=%u ms", totalSets, elapsed);
         }
 
-        // Check if AWAKE has cleared.
         if (!m_motion.IsAwake()) {
           LOG_INF("FIFO: AWAKE cleared after %u ms.", elapsed);
           break;
         }
 
-        // Timeout protection.
         if (elapsed >= FIFO_TIMEOUT_MS) {
           LOG_WRN("FIFO: Timeout (%u ms) - AWAKE still HIGH.", FIFO_TIMEOUT_MS);
+          break;
+        }
+
+        if (totalSets >= FIFO_TOTAL_MAX) {
+          LOG_WRN("FIFO: Sample buffer full (%u sets).", totalSets);
           break;
         }
 
         k_msleep(POLL_INTERVAL_MS);
       }
 
-      // Final FIFO drain after AWAKE cleared.
-      uint16_t finalSets { 0 };
-      m_motion.ReadFifo(fifoBuffer, FIFO_MAX_SETS, finalSets);
-      if (finalSets > 0) {
-        totalSets += finalSets;
-        lastY = fifoBuffer[finalSets - 1].y;
-        lastZ = fifoBuffer[finalSets - 1].z;
-        LOG_INF("FIFO: Final drain +%u sets (total=%u).", finalSets, totalSets);
+      // Final drain.
+      readAndAccumulate();
+
+      // ===== Analysis =====
+      uint32_t awakeDuration { static_cast<uint32_t>(k_uptime_get() - awakeStartTime) };
+      uint16_t awayFromHomeCount { 0 };
+      uint16_t maxConsecAway { 0 };
+      uint16_t consecAway { 0 };
+
+      for (uint16_t i = 0; i < totalSets; ++i) {
+        int32_t dy { allSamples[i].y - HOME_Y };
+        int32_t dz { allSamples[i].z - HOME_Z };
+        bool away { (dy > homeTolerance || dy < -homeTolerance) ||
+                    (dz > homeTolerance || dz < -homeTolerance) };
+
+        if (away) {
+          awayFromHomeCount++;
+          consecAway++;
+          if (consecAway > maxConsecAway) {
+            maxConsecAway = consecAway;
+          }
+        } else {
+          consecAway = 0;
+        }
       }
 
-      // "At home" check: Y≈1000mg, Z≈0mg, both ±100mg.
-      bool atHome { (lastY >= 900 && lastY <= 1100) && (lastZ >= -100 && lastZ <= 100) };
+      // At 12.5 SPS, each sample = 80ms. Check if away for >= 500ms (~6 samples).
+      constexpr uint16_t MIN_AWAY_SAMPLES { 6 };  // ~500ms at 12.5 SPS.
+      bool significantMotion { maxConsecAway >= MIN_AWAY_SAMPLES };
 
-      uint32_t awakeDuration { static_cast<uint32_t>(k_uptime_get() - awakeStartTime) };
+      // Check last sample for current position.
+      int16_t lastY { (totalSets > 0) ? allSamples[totalSets - 1].y : 0 };
+      int16_t lastZ { (totalSets > 0) ? allSamples[totalSets - 1].z : 0 };
+      bool atHome { (lastY >= HOME_Y - homeTolerance && lastY <= HOME_Y + homeTolerance) &&
+                    (lastZ >= HOME_Z - homeTolerance && lastZ <= HOME_Z + homeTolerance) };
+
       LOG_INF("────────────────────────────────────────");
       LOG_INF("FIFO SUMMARY:");
-      LOG_INF("  Total sample sets: %u", totalSets);
+      LOG_INF("  Total samples:     %u", totalSets);
       LOG_INF("  Awake duration:    %u ms", awakeDuration);
+      LOG_INF("  Away from home:    %u / %u samples", awayFromHomeCount, totalSets);
+      LOG_INF("  Max consec away:   %u (need %u for significant)", maxConsecAway, MIN_AWAY_SAMPLES);
+      LOG_INF("  Significant motion: %s", significantMotion ? "YES" : "NO");
       LOG_INF("  Last Y: %d mg, Last Z: %d mg", lastY, lastZ);
       LOG_INF("  At home: %s", atHome ? "YES" : "NO");
+      LOG_INF("  Activity threshold: %u mg", m_config.activityThresholdMg);
       LOG_INF("────────────────────────────────────────");
     }
 
