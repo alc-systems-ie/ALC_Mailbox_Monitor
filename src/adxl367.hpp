@@ -81,6 +81,20 @@ namespace alc
       };
 
       /**
+       * @brief Acceleration data for all three axes.
+       *
+       * Values are in milli-g (mg), sign-extended from 14-bit ADC values.
+       * At ±2g range: 0.25 mg/LSB, max ±8192 mg
+       * At ±4g range: 0.5 mg/LSB, max ±16384 mg
+       * At ±8g range: 1.0 mg/LSB, max ±32768 mg
+       */
+      struct AxisData {
+        int16_t x;  ///< X-axis acceleration in mg.
+        int16_t y;  ///< Y-axis acceleration in mg.
+        int16_t z;  ///< Z-axis acceleration in mg.
+      };
+
+      /**
        * @brief Activity/inactivity configuration.
        * 
        * All threshold values are in mg (milli-g).
@@ -209,6 +223,17 @@ namespace alc
        * @return True if awake (motion detected).
        */
       bool IsAwake();
+
+      /**
+       * @brief Read acceleration data from all three axes.
+       *
+       * Reads the 14-bit acceleration values and converts to milli-g
+       * based on the current range setting.
+       *
+       * @param data Reference to AxisData structure to fill.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadAxes(AxisData& data);
 
       // ========== Threshold Updates (for MQTT tuning) ==========
 
