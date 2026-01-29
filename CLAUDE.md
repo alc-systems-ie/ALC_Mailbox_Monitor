@@ -350,9 +350,11 @@ The approach uses a single-wake design with three event classifications:
 
 **Case 1 (Bump):** AWAKE was LOW at boot — motion ended before MCU started. Ignored.
 
-**Case 2 (Mail delivery):** AWAKE was HIGH at boot, device returns to home position within 30s timeout. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
+**Case 2 (Mailbox visited):** AWAKE was HIGH at boot, device settles at home position. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
 
-**Case 3 (Door left open):** AWAKE was HIGH at boot, 30s poll timeout expires, device NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
+**Case 3 (Door left open):** AWAKE was HIGH at boot, device settles but NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
+
+**Important:** Case 3 triggers on position (NOT HOME), not on the 30s AWAKE timeout. Because `configureMotionSensor()` resets the ADXL367 reference on boot, AWAKE clears instantly when the box is stable in the open position — the 30s timeout never fires. The timeout remains only as a safety net for a genuinely stuck AWAKE signal.
 
 ### Escalating Door-Open Timer
 
