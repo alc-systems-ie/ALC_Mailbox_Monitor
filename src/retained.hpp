@@ -47,11 +47,20 @@ static constexpr uint8_t DEFAULT_MAX_BUFFERED_EVENTS { 10 };
 static constexpr uint16_t DEFAULT_POLL_INTERVAL { 60 };
 
 /**
- * @brief A single buffered mail delivery event.
+ * @brief Event type for buffered events.
+ */
+enum class EventType : uint8_t {
+    MailboxVisited = 0,   ///< Door opened and closed (delivery or collection).
+    MailboxOpen = 1       ///< Door left open (escalating timer notification).
+};
+
+/**
+ * @brief A single buffered mailbox event.
  */
 struct BufferedEvent {
     uint32_t timestamp;       ///< Event time in seconds since boot (TODO: RTC epoch).
     bool owner_intervened;    ///< True if owner was present (hall sensor, future).
+    EventType event_type;     ///< Type of event (visited or open).
 };
 
 /**
@@ -61,13 +70,13 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D41494D;  // "MAIM" - version 2 with provisioning.
+    static constexpr uint32_t MAGIC = 0x4D414950;  // "MAIP" - version 5 with event types.
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
     uint8_t max_events;                            ///< Current max buffer size (runtime config).
     bool enabled;                                  ///< Device operational state (false = provisioning mode).
-    uint8_t reserved;                              ///< Padding for alignment.
+    uint8_t door_open_stage;                       ///< Escalating door-open timer stage (0=inactive, 1-3=pending).
     uint16_t poll_interval;                        ///< Provisioning poll interval (seconds).
     BufferedEvent events[BUFFER_HARDWARE_MAX];     ///< Event buffer, oldest at index 0.
 };
@@ -124,8 +133,9 @@ uint8_t getMaxBufferedEvents();
  *
  * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
  * @param ownerIntervened True if owner was present during delivery.
+ * @param type Event type (MailboxVisited or MailboxOpen).
  */
-void bufferMailEvent(uint32_t timestamp, bool ownerIntervened);
+void bufferMailEvent(uint32_t timestamp, bool ownerIntervened, EventType type = EventType::MailboxVisited);
 
 /**
  * @brief Get the number of buffered events waiting to be sent.
@@ -159,6 +169,25 @@ inline bool hasBufferedEvents()
 {
     return g_retained.event_count > 0;
 }
+
+/**
+ * @brief Set the door-open escalation stage.
+ *
+ * Persisted to flash across System OFF. Tracks which notification
+ * in the escalating sequence has been sent (0=none, 1-3=stage).
+ * Maximum 3 notifications: stage 1 (4 min), stage 2 (1 hr), stage 3 (2 hr).
+ * Reset to 0 on door-close.
+ *
+ * @param stage Escalation stage (0-3).
+ */
+void setDoorOpenStage(uint8_t stage);
+
+/**
+ * @brief Get the door-open escalation stage.
+ *
+ * @return Current stage (0=inactive, 1-3=timer pending/sent).
+ */
+uint8_t getDoorOpenStage();
 
 /**
  * @brief Set the device enabled state.

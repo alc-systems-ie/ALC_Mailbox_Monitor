@@ -4,18 +4,18 @@
  * @file app.hpp
  * @brief ALC Mailbox Monitor Application.
  *
- * Simplified state machine for detecting mail delivery using nPM1300 GP Timer:
+ * Single-wake state machine for detecting mail delivery:
  *
  * Logic:
  * 1. Device sleeps in System OFF (nA power consumption).
  * 2. Motion detected → ADXL367 AWAKE signal wakes device.
- * 3. Check if nPM1300 timer is running:
- *    - If timer NOT running: Start 4-minute timer → OPEN event → sleep
- *    - If timer IS running: Stop timer → CLOSE event → send MQTT → sleep
- * 4. Return to System OFF.
+ * 3. MCU polls AWAKE until it clears (door closed / device at rest).
+ * 4. Send MQTT "mail_delivered" notification.
+ * 5. Return to System OFF.
  *
- * The nPM1300 timer persists across MCU System OFF, eliminating the need
- * for retained RAM or settings-based time persistence.
+ * ADXL367 uses referenced activity/inactivity in loop mode with autosleep.
+ * AWAKE stays HIGH while device is displaced from its rest position and
+ * only clears when returned to the home orientation.
  *
  * Active wake sources:
  * - ADXL367 INT1 (P0.11): Motion detection
@@ -45,10 +45,17 @@ namespace alc
   constexpr uint32_t M_MAIL_WINDOW_SECS { 240 };        // 4 minutes - defines open/close cycle.
   constexpr uint32_t M_HEARTBEAT_HOUR { 3 };            // 3am for nightly heartbeat.
 
+  // Door-open escalating timer durations (seconds).
+  // Stage 1: 4 minutes, Stage 2: 1 hour, Stage 3: 2 hours.
+  // Testing values: 20s / 30s / 40s — swap comments for production.
+  constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 20, 30, 40 };     // Testing.
+  // constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 240, 3600, 7200 }; // Production.
+  constexpr uint8_t M_DOOR_OPEN_MAX_STAGE { 3 };
+
   // ADXL367 defaults (configurable via MQTT).
   constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 250 };   // Activity threshold in mg.
   constexpr uint8_t M_ACTIVITY_TIME { 1 };              // Activity time in samples.
-  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 1200 };// Inactivity threshold in mg.
+  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 250 }; // Inactivity threshold in mg (referenced mode).
   constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
 
   // Provisioning mode poll interval limits (seconds).
@@ -134,8 +141,9 @@ namespace alc
        * This function does not return.
        *
        * @param wake The wake source (detected in main before App construction).
+       * @param awakeAtBoot True if ADXL367 INT1 pin was HIGH at boot (before init).
        */
-      void Start(WakeSource wake);
+      void Start(WakeSource wake, bool awakeAtBoot = false);
 
       // MQTT callbacks.
       void OnMqttConnected();
@@ -146,11 +154,10 @@ namespace alc
       // ========== Wake Handling ==========
 
       /**
-       * @brief Handle motion wake - core state machine logic.
+       * @brief Handle motion wake - single-wake mail detection.
        *
-       * Uses nPM1300 timer to determine event type:
-       * - Timer not running → OPEN event → start timer
-       * - Timer running → CLOSE event → stop timer, send MQTT
+       * Polls AWAKE until device returns to rest, then sends mail event.
+       * MCU stays awake during the entire open period.
        */
       void handleMotionWake();
 
@@ -215,11 +222,12 @@ namespace alc
       void disconnectFromCloud();
 
       /**
-       * @brief Send mail delivered event.
+       * @brief Send a mailbox event (visited or open).
        * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
        * @param ownerIntervened Whether owner signalled (placeholder for future).
+       * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened);
+      bool sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type);
 
       /**
        * @brief Send all buffered mail events.
@@ -333,6 +341,9 @@ namespace alc
 
       // Track if network hardware has been initialised.
       bool m_networkInitialised { false };
+
+      // ADXL367 AWAKE state captured before init (motion still ongoing at boot).
+      bool m_awakeAtBoot { false };
 
       // Boot counter for debugging.
       uint32_t m_boot_count;

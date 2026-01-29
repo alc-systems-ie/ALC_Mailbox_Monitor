@@ -21,13 +21,17 @@ minicom -D /dev/tty.usbmodem* -b 115200
 
 ## Architecture
 
-### State Machine (Timer-Based)
+### State Machine (Single-Wake)
 
-The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs:
+Single wake event per mail delivery cycle:
 
-1. **OPEN Event** (first motion): Timer expired → Start 240s timer → Sleep
-2. **CLOSE Event** (second motion within window): Timer running → Send MQTT "mail_delivered" → Sleep
-3. Timer expiry resets state automatically
+1. **System OFF**: Device sleeps (~180nA, ADXL367 wake-up mode)
+2. **Motion detected**: ADXL367 AWAKE rises → MCU wakes from System OFF
+3. **Poll AWAKE**: MCU stays awake polling until AWAKE clears (door closed)
+4. **Send event**: Connect to MQTT, send `mailbox_visited` or `mailbox_open`, disconnect
+5. **System OFF**: Return to sleep
+
+The nPM1300 GP Timer drives an escalating door-open notification sequence when the door is left open. It also handles fresh boot initialisation (3s timer to establish ready state) and may be used for future heartbeat timing.
 
 ### Source Files
 
@@ -81,7 +85,7 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 | `mail_window` | uint32 | 240 | 1 | 86400 | seconds | Time window for open/close detection cycle |
 | `activity_threshold` | uint16 | 250 | 1 | 8000 | mg | Motion sensitivity for wake trigger |
 | `activity_time` | uint8 | 1 | 1 | 255 | samples | Consecutive samples above threshold to trigger |
-| `inactivity_threshold` | uint16 | 1200 | 1 | 8000 | mg | Threshold to return to inactive state |
+| `inactivity_threshold` | uint16 | 250 | 1 | 8000 | mg | Threshold to return to inactive state (referenced mode) |
 | `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
 | `max_buffered_events` | uint8 | 10 | 1 | 20 | events | Maximum mail events to buffer when offline |
 | `poll_interval` | uint16 | 60 | 10 | 300 | seconds | Provisioning mode wake/poll interval |
@@ -159,13 +163,14 @@ Commands should be **retained messages**. The enable/disable commands are automa
 
 ### State Persistence
 
-The `enabled` and `poll_interval` values are stored in NVS flash and persist across System OFF cycles:
+The `enabled`, `poll_interval`, and `door_open_stage` values are stored in NVS flash and persist across System OFF cycles:
 
 ```cpp
 struct RetainedState {
     ...
-    bool enabled;           // Device operational state
-    uint16_t poll_interval; // Provisioning poll interval (seconds)
+    bool enabled;              // Device operational state
+    uint8_t door_open_stage;   // Escalating door-open timer (0=inactive, 1-3)
+    uint16_t poll_interval;    // Provisioning poll interval (seconds)
     ...
 };
 ```
@@ -191,7 +196,7 @@ Device publishes to: `alc/{DEVICE_ID}/status`
   "mail_window": 240,
   "activity_threshold": 250,
   "activity_time": 1,
-  "inactivity_threshold": 1200,
+  "inactivity_threshold": 250,
   "inactivity_time": 10,
   "max_buffered_events": 10,
   "buffered_events": 0
@@ -278,13 +283,122 @@ The 3-second timer initialisation on fresh boot establishes the "ready for OPEN"
 enum class WakeSource { Accelerometer, Timer, HallSensor, PowerOn };
 ```
 
-Hall sensor (P0.02) stubbed but not implemented.
+- **Accelerometer (P0.11):** ADXL367 INT1 — motion detection, always enabled.
+- **Timer (P0.02):** nPM1300 SHPHLD GPIO — door-open escalating timer and future heartbeat. Always configured as wake source; no-op if no timer is running.
+- **Hall sensor:** Stubbed but not implemented.
 
 ### ADXL367 AWAKE State Before System OFF
 
 The GPIO latch only captures **rising edges**. Before entering System OFF, the firmware waits for ADXL367 to return to inactive state (AWAKE=0). If AWAKE=1 when entering System OFF, and it clears during boot, no rising edge occurs and the latch won't be set - causing wake source detection to fail.
 
 See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
+
+### ADXL367 Loop Mode with Referenced Activity/Inactivity
+
+The ADXL367 uses **loop mode** with **referenced** activity and inactivity detection. Referenced mode compares acceleration against a reference point captured at the last state transition, rather than against an absolute value. This correctly detects orientation changes (lid open/close) that don't exceed absolute thresholds.
+
+**Configuration:**
+- Activity: Referenced, 250mg threshold, 1 sample
+- Inactivity: Referenced, 250mg threshold, 10 samples (~1.6s at 6 SPS)
+- Link/loop: Loop (auto-acknowledged, sequential act→inact)
+- Autosleep enabled (POWER_CTL bit 2): device autonomously switches between measurement and wake-up mode
+
+**Loop Mode Startup Sequence (required):**
+
+In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activity→inactivity cycle completes. The datasheet specifies a startup sequence to clear this:
+
+```cpp
+// 1. Configure with dummy thresholds (in Standby)
+//    Activity threshold = 1mg (below noise floor → triggers immediately)
+//    Inactivity threshold = 8000mg (full scale → triggers immediately)
+//    Both referenced mode, loop mode
+
+// 2. Enter measurement + autosleep (POWER_CTL = 0x06)
+//    This starts the loop state machine
+
+// 3. Wait for AWAKE=0 (~100ms)
+//    The dummy thresholds cause immediate activity→inactivity cycle
+
+// 4. Reconfigure ONLY threshold/timer registers (0x20-0x26)
+//    with real values (e.g. 250mg activity, 250mg inactivity)
+```
+
+**Critical: Do NOT write ACT_INACT_CTL (0x27) during step 4.** Writing the mode register while in measurement mode resets the loop state machine, causing AWAKE to stick HIGH again. Only write threshold and timer registers (0x20-0x26).
+
+**Behaviour:**
+- Device sleeps in home position (AWAKE=0, ~180nA wake-up mode)
+- Any movement exceeding 250mg from reference → AWAKE=1 (activity detected)
+- Device must settle within 250mg of a new reference for 10 samples → AWAKE=0
+- Device only returns to AWAKE=0 in its home position, not on an edge/tilted
+- If door is left open (different orientation from home), AWAKE stays HIGH
+
+**Register Naming Convention:**
+- Register addresses: `M_REG_` prefix (e.g. `M_REG_STATUS`, `M_REG_THRESH_ACT_H`)
+- Masks and constants: `M_` prefix (e.g. `M_AWAKE_MASK`, `M_WAKEUP_RATE_SHIFT`)
+
+**Data Register Format (ReadAxes, 0x0E-0x13):**
+- H[7:0] = D[13:6], L[7:2] = D[5:0], L[1:0] = reserved
+- Different from FIFO format (D[15:14]=channel ID, D[13:0]=signed 14-bit)
+
+### Motion Detection State Machine
+
+The approach uses a single-wake design with three event classifications:
+
+1. **Wake from System OFF** (ADXL367 AWAKE rising edge)
+2. **Capture AWAKE state** at boot (before driver init resets the sensor)
+3. **Classify event:**
+
+**Case 1 (Bump):** AWAKE was LOW at boot — motion ended before MCU started. Ignored.
+
+**Case 2 (Mailbox visited):** AWAKE was HIGH at boot, device settles at home position. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
+
+**Case 3 (Door left open):** AWAKE was HIGH at boot, device settles but NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
+
+**Important:** Case 3 triggers on position (NOT HOME), not on the 30s AWAKE timeout. Because `configureMotionSensor()` resets the ADXL367 reference on boot, AWAKE clears instantly when the box is stable in the open position — the 30s timeout never fires. The timeout remains only as a safety net for a genuinely stuck AWAKE signal.
+
+### Escalating Door-Open Timer
+
+When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalating notifications via System OFF wake on P0.02:
+
+| Stage | Duration (production) | Duration (testing) | Action on expiry |
+|-------|----------------------|-------------------|-----------------|
+| 1 | 4 minutes | 20 seconds | Send notification, start stage 2 timer |
+| 2 | 1 hour | 30 seconds | Send notification, start stage 3 timer |
+| 3 | 2 hours | 40 seconds | Send final notification, stop (no more timers) |
+
+**Durations** are defined in `M_DOOR_OPEN_DURATIONS[]` in `app.hpp`. Testing and production values are provided; swap the active line to switch.
+
+**Persistence:** The current stage (`door_open_stage`, 0-3) is stored in `RetainedState` in NVS flash, surviving System OFF. This allows the firmware to know on a timer wake which stage to escalate to next.
+
+**Flow:**
+1. Case 3 detected → check `door_open_stage`. If already at max (3), do nothing.
+2. Stop any existing timer (`TimerStop()`), then start timer with `M_DOOR_OPEN_DURATIONS[stage]`, set `door_open_stage = stage + 1`.
+3. Timer expires → `handleTimerWake()` sends notification, checks if `stage < 3`.
+4. If under cap: start next timer, increment stage. If at cap: reset stage to 0, stop.
+5. Door close at any point (case 2): stop timer hardware, disable interrupt, reset stage to 0.
+
+**Edge case — gust of wind:** If the door is open and a gust triggers an accelerometer wake while a stage timer is running, the MCU boots, detects NOT HOME (case 3 again), and restarts the timer at the current stage. The existing timer is explicitly stopped before starting the new one to ensure deterministic behaviour. The stage does not advance — only a timer expiry advances the stage.
+
+**Wake sources for System OFF:**
+- P0.11 (ADXL367 INT1): Motion detection — always enabled.
+- P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
+
+**Power consideration:** During the initial wake, the MCU polls AWAKE briefly (typically 0ms when door is stable open, up to 30s safety timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
+
+### FIFO Configuration
+
+- FIFO mode: Stream (always contains most recent data)
+- Channels: XYZ only
+- ODR: 50 Hz (in measurement mode), wake-up rate 6 SPS (in autosleep)
+- FIFO read register: 0x18 (I2C_FIFO_DATA), bulk read
+
+**FIFO Data Format (different from data registers):**
+- 16 bits per sample: D[15:14] = channel ID, D[13:0] = signed 14-bit data
+- Samples arrive in X, Y, Z order (3 samples per XYZ set)
+
+**Known Issues / Quirks:**
+- `mailbox_visited` MQTT publish currently suppressed for testing
+- Main stack increased to 8K for analysis buffers — review if this can be reduced
 
 ### Event Buffering (NVS Flash)
 
@@ -294,16 +408,23 @@ Mail delivery events are buffered in NVS flash when network connectivity fails. 
 
 **Structure (`retained.hpp`):**
 ```cpp
+enum class EventType : uint8_t {
+    MailboxVisited = 0,   // Door opened and closed (delivery or collection)
+    MailboxOpen = 1       // Door left open (escalating timer notification)
+};
+
 struct BufferedEvent {
     uint32_t timestamp;       // Seconds since boot (TODO: RTC epoch)
     bool owner_intervened;    // Future: hall sensor detected
+    EventType event_type;     // mailbox_visited or mailbox_open
 };
 
 struct RetainedState {
-    uint32_t magic;           // 0x4D41494D ("MAIM") for validity - version 2
+    uint32_t magic;           // 0x4D414950 ("MAIP") for validity - version 5
     uint8_t event_count;      // Number of buffered events
     uint8_t max_events;       // Runtime configurable (1-20)
     bool enabled;             // Device operational state (false = provisioning)
+    uint8_t door_open_stage;  // Escalating door-open timer stage (0=inactive, 1-3)
     uint16_t poll_interval;   // Provisioning poll interval (seconds)
     BufferedEvent events[20]; // Circular buffer, oldest at index 0
 };
@@ -325,7 +446,7 @@ When sending multiple buffered events (catch-up after outage):
 **Event Message Format:**
 ```json
 {
-  "event": "mail_delivered",
+  "event": "mailbox_visited",
   "timestamp": 12345,
   "owner_intervened": false
 }
@@ -333,9 +454,13 @@ When sending multiple buffered events (catch-up after outage):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event` | string | Always `"mail_delivered"` |
+| `event` | string | `"mailbox_visited"` or `"mailbox_open"` (see below) |
 | `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
 | `owner_intervened` | bool | `true` suppresses SMS notification |
+
+**Event Types:**
+- `mailbox_visited` — Door opened and closed (case 2). Covers both mail delivery and collection; the device cannot discriminate between the two.
+- `mailbox_open` — Door left open (timer wake). Sent by the escalating door-open timer sequence (up to 3 notifications).
 
 The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
 

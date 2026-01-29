@@ -47,8 +47,9 @@ namespace alc
 
   // ========== Start (Main Entry Point) ==========
 
-  void App::Start(WakeSource wake)
+  void App::Start(WakeSource wake, bool awakeAtBoot)
   {
+    m_awakeAtBoot = awakeAtBoot;
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║     ALC MAILBOX MONITOR v0.3.0         ║");
     LOG_INF("║     (Simplified Timer Logic)           ║");
@@ -193,8 +194,6 @@ namespace alc
     // =========================================================================
     // Check if device is enabled for normal operation.
     // =========================================================================
-    // Note: This shouldn't happen since provisioning mode no longer uses System OFF,
-    // but handle it gracefully by entering provisioning loop.
     if (!isEnabled()) {
       LOG_INF("Device disabled - motion wake ignored.");
       LOG_INF("Entering provisioning mode...");
@@ -203,107 +202,190 @@ namespace alc
     }
 
     // =========================================================================
-    // Core Logic: Use ONLY TimerIsExpired() to determine event type
-    // =========================================================================
+    // Motion wake event classification (pre-init AWAKE capture):
     //
-    // This approach relies on the timer expired event flag (EVENTSSHPHLDSET Bit3)
-    // which persists across System OFF and reliably indicates timer state:
+    // The AWAKE pin state is captured in main.cpp BEFORE any driver init
+    // (which resets the ADXL367). This tells us if motion was still ongoing
+    // when the MCU booted (~250ms after wake).
     //
-    //   Expired = TRUE  → Timer has expired (or never started)
-    //                   → This is an OPEN event (or timeout/spurious)
-    //                   → Clear the flag, start mail window timer
+    // Case 1 (Bump):
+    //   AWAKE was LOW at boot → motion ended before MCU started → ignore
     //
-    //   Expired = FALSE → Timer is still running
-    //                   → This is a CLOSE event (second motion within window)
-    //                   → Send MQTT notification, leave timer running
+    // Case 2 (Mail delivery):
+    //   AWAKE was HIGH at boot → real movement → poll until rest → send event
     //
-    // State transitions:
-    //   Fresh boot: Run short timer, wait for expiry → Expired=TRUE (ready)
-    //   OPEN event: Clear expired flag, start timer → Expired=FALSE (waiting)
-    //   CLOSE event: Send MQTT, timer keeps running → Expired=FALSE
-    //   Timer expires naturally: → Expired=TRUE (ready for next cycle)
-    //
-    // Edge case: If mailbox opened twice within window, both trigger CLOSE
-    // events. Server-side deduplication handles this.
+    // Case 3 (Door left open):
+    //   AWAKE was HIGH at boot → poll times out after 30s → not home →
+    //   start incremental timer.
+    //   TODO: Implement with PMIC timer wake (P0.02).
     // =========================================================================
 
-    bool timerExpired = m_pmic.TimerIsExpired();
+    constexpr uint32_t M_AWAKE_TIMEOUT_MS { 30000 };  // 30 seconds.
+    constexpr uint32_t M_AWAKE_POLL_MS { 200 };
 
-    LOG_INF("────────────────────────────────────────");
-    LOG_INF("TIMER STATE:");
-    LOG_INF("  Timer expired: %s", timerExpired ? "YES (ready for OPEN)" : "NO (waiting for CLOSE)");
-    LOG_INF("  Mail window:   %u seconds", m_config.mailWindowSecs);
-    LOG_INF("────────────────────────────────────────");
+    // Home position (flat on desk — adjust for mounted orientation).
+    constexpr int16_t M_HOME_X { 0 };
+    constexpr int16_t M_HOME_Y { 0 };
+    constexpr int16_t M_HOME_Z { -1000 };  // Gravity on Z-axis when flat.
 
-    if (timerExpired) {
-      // ===== OPEN EVENT (or timeout/spurious) =====
-      LOG_INF("╔════════════════════════════════════════╗");
-      LOG_INF("║  OPEN EVENT - STARTING TIMER           ║");
-      LOG_INF("╚════════════════════════════════════════╝");
+    LOG_INF("AWAKE at boot: %s", m_awakeAtBoot ? "YES (motion ongoing)" : "NO (bump)");
 
-      // Clear the expired flag first.
-      m_pmic.TimerClearEvent();
+    // =========================================================================
+    // Case 1: AWAKE was already LOW at boot — brief bump.
+    // =========================================================================
+    if (!m_awakeAtBoot) {
+      LOG_INF("Classification: BUMP (AWAKE cleared before boot)");
+      LOG_INF("Ignoring spurious wake - returning to sleep.");
+      return;
+    }
 
-      // Set duration and start the timer.
-      int result = m_pmic.TimerSetDuration(m_config.mailWindowSecs);
-      if (result < 0) {
-        LOG_ERR("Failed to set timer duration: %d", result);
+    // =========================================================================
+    // AWAKE was HIGH at boot — real movement. Poll until it clears.
+    // Note: configureMotionSensor() has already run (resets ADXL367), so we
+    // poll the freshly-configured sensor. AWAKE will reassert if the device
+    // is still displaced from its new reference point.
+    // =========================================================================
+    LOG_INF("Polling AWAKE until device returns to rest...");
+
+    int64_t startTime { k_uptime_get() };
+    uint32_t elapsed { 0 };
+
+    while (m_motion.IsAwake() && (elapsed < M_AWAKE_TIMEOUT_MS)) {
+      k_msleep(M_AWAKE_POLL_MS);
+      elapsed = static_cast<uint32_t>(k_uptime_get() - startTime);
+
+      // Log progress every 5 seconds.
+      if ((elapsed % 5000) < M_AWAKE_POLL_MS) {
+        int16_t x { 0 }, y { 0 }, z { 0 };
+        m_motion.ReadAxes(x, y, z);
+        LOG_INF("[%5u ms] AWAKE=1 | X=%d Y=%d Z=%d mg", elapsed, x, y, z);
       }
+    }
 
-      result = m_pmic.TimerStart();
-      if (result < 0) {
-        LOG_ERR("Failed to start timer: %d", result);
-      } else {
-        LOG_INF("Timer started: %u second window.", m_config.mailWindowSecs);
-      }
+    LOG_INF("AWAKE polling complete: %u ms", elapsed);
 
-      // No network activity needed for open event - go straight back to sleep.
-      LOG_INF("Open event recorded. Waiting for close event...");
+    // Small delay for readings to settle.
+    k_msleep(100);
 
-    } else {
-      // ===== CLOSE EVENT - MAIL DELIVERED =====
+    // Read settled position.
+    int16_t x { 0 }, y { 0 }, z { 0 };
+    m_motion.ReadAxes(x, y, z);
+    LOG_INF("Settled position: X=%d Y=%d Z=%d mg", x, y, z);
+
+    // Check if device is at home position.
+    int16_t threshold { static_cast<int16_t>(m_config.activityThresholdMg) };
+    bool atHome { (abs(x - M_HOME_X) < threshold) &&
+                  (abs(y - M_HOME_Y) < threshold) &&
+                  (abs(z - M_HOME_Z) < threshold) };
+
+    LOG_INF("Position: %s (threshold: %d mg)", atHome ? "HOME" : "NOT HOME", threshold);
+
+    // Estimate total event time: ~300ms boot overhead + elapsed polling.
+    constexpr uint32_t M_BOOT_OVERHEAD_MS { 300 };
+    uint32_t totalTime { M_BOOT_OVERHEAD_MS + elapsed + 100 /* settle delay */ };
+
+    // =========================================================================
+    // Case 3: Device at rest but NOT at home — door left open.
+    // This triggers whether AWAKE timed out (30s) or cleared quickly (device
+    // settled in the open position after configureMotionSensor() recalibrated).
+    // =========================================================================
+    if (!atHome) {
       LOG_INF("╔════════════════════════════════════════╗");
-      LOG_INF("║  CLOSE EVENT - MAIL DELIVERED!         ║");
+      LOG_INF("║       DOOR LEFT OPEN                   ║");
       LOG_INF("╚════════════════════════════════════════╝");
+      LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
+              totalTime, M_BOOT_OVERHEAD_MS, elapsed);
 
-      // Don't touch the timer - let it expire naturally.
-      // This resets the state to "ready for OPEN" automatically.
-      LOG_INF("Timer left running - will expire and reset state.");
+      uint8_t stage { getDoorOpenStage() };
 
-      // Get timestamp for this event.
-      // TODO: Replace with RTC epoch time once RTC hardware is fitted.
-      uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-      bool ownerIntervened { false };  // Placeholder for future Hall sensor.
-
-      // Always buffer the event first (ensures it's not lost if connection fails).
-      bufferMailEvent(timestamp, ownerIntervened);
-
-      // Initialise network hardware (modem, MQTT) - only needed for CLOSE events.
-      if (!initNetworkHardware()) {
-        LOG_ERR("Network init failed - event buffered for later.");
-        LOG_INF("Buffered events: %d", getBufferedEventCount());
+      // Already sent all 3 notifications — no more timers.
+      if (stage >= M_DOOR_OPEN_MAX_STAGE) {
+        LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
+        configureMotionSensor();
         return;
       }
 
-      // Attempt to connect and send all buffered events.
-      if (connectToCloud()) {
-        if (sendBufferedEvents()) {
-          LOG_INF("All buffered events sent successfully.");
+      // Stop any existing timer before starting the next one.
+      // Handles edge case: gust of wind triggers accelerometer wake
+      // while a previous stage timer is still running.
+      m_pmic.TimerStop();
 
-          // Also send battery status while connected.
-          sendBatteryStatus();
+      // Start the next escalating timer (stage 0→1, 1→2, 2→3).
+      uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
 
-          // Collect any pending commands.
-          collectMqttCommands();
-        } else {
-          LOG_ERR("Failed to send some buffered events!");
-        }
+      configureMailWindowTimer();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerSetDuration(duration);
+      m_pmic.TimerEnableInterrupt();
+      m_pmic.TimerStart();
 
-        disconnectFromCloud();
+      setDoorOpenStage(stage + 1);
+      LOG_INF("Door-open timer stage %u started: %u seconds. Entering System OFF.",
+              stage + 1, duration);
+
+      // Recalibrate ADXL367 so a door-close also triggers a wake.
+      configureMotionSensor();
+
+      return;
+    }
+
+    // AWAKE timed out but device is at home — recalibrate to clear.
+    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
+      LOG_INF("AWAKE stuck at home - recalibrating ADXL367...");
+      int recalResult { configureMotionSensor() };
+      if (recalResult < 0) {
+        LOG_ERR("Recalibration failed: %d", recalResult);
       } else {
-        LOG_ERR("Failed to connect to cloud - events buffered for later.");
-        LOG_INF("Buffered events: %d", getBufferedEventCount());
+        LOG_INF("Recalibration complete.");
       }
+    }
+
+    // =========================================================================
+    // Case 2: Mail delivery — AWAKE was HIGH at boot, device now at home.
+    // =========================================================================
+
+    // Stop door-open timer if running (case 3 recovery).
+    if (getDoorOpenStage() > 0) {
+      LOG_INF("Stopping door-open timer stage %u (door closed).", getDoorOpenStage());
+      m_pmic.TimerStop();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerDisableInterrupt();
+      setDoorOpenStage(0);
+    }
+
+    // ===== MAIL DELIVERY =====
+    LOG_INF("╔════════════════════════════════════════╗");
+    LOG_INF("║       MAILBOX VISITED                  ║");
+    LOG_INF("╚════════════════════════════════════════╝");
+    LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
+            totalTime, M_BOOT_OVERHEAD_MS, elapsed);
+
+    uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
+    bool ownerIntervened { false };  // Placeholder for future Hall sensor.
+
+    // Buffer the event first (ensures it's not lost if connection fails).
+    bufferMailEvent(timestamp, ownerIntervened);
+
+    // Initialise network hardware (modem, MQTT).
+    if (!initNetworkHardware()) {
+      LOG_ERR("Network init failed - event buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
+      return;
+    }
+
+    // Attempt to connect and send all buffered events.
+    if (connectToCloud()) {
+      if (sendBufferedEvents()) {
+        LOG_INF("All buffered events sent successfully.");
+        sendBatteryStatus();
+        collectMqttCommands();
+      } else {
+        LOG_ERR("Failed to send some buffered events!");
+      }
+      disconnectFromCloud();
+    } else {
+      LOG_ERR("Failed to connect to cloud - events buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
     }
 
     LOG_INF("Motion wake handling complete.");
@@ -328,35 +410,61 @@ namespace alc
       // Does not return (loops until enabled, then reboots).
     }
 
-    // Normal heartbeat mode.
+    uint8_t stage { getDoorOpenStage() };
+
+    // Door-open timer expired — send notification.
     LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║          TIMER WAKE (HEARTBEAT)        ║");
+    LOG_INF("║   TIMER WAKE (DOOR OPEN stage %u)      ║", stage);
     LOG_INF("╚════════════════════════════════════════╝");
 
-    // Initialise network hardware for heartbeat.
+    // Disable timer interrupt (will re-enable if escalating).
+    m_pmic.TimerDisableInterrupt();
+
+    // Buffer a mailbox_open event.
+    uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
+    bufferMailEvent(timestamp, false, EventType::MailboxOpen);
+
+    // Initialise network hardware.
     if (!initNetworkHardware()) {
-      LOG_ERR("Network init failed for heartbeat!");
-      return;
-    }
-
-    // Connect and send heartbeat (also sends any buffered events).
-    if (connectToCloud()) {
-      // Send any buffered events first.
-      if (hasBufferedEvents()) {
-        LOG_INF("Sending %d buffered events...", getBufferedEventCount());
-        sendBufferedEvents();
+      LOG_ERR("Network init failed - mailbox_open event buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
+    } else if (connectToCloud()) {
+      if (sendBufferedEvents()) {
+        LOG_INF("Door-open event (stage %u) sent successfully.", stage);
+        sendBatteryStatus();
+        collectMqttCommands();
+      } else {
+        LOG_ERR("Failed to send door-open event!");
       }
-
-      sendHeartbeat();
-      sendBatteryStatus();
-      collectMqttCommands();
       disconnectFromCloud();
     } else {
-      LOG_ERR("Failed to connect for heartbeat!");
+      LOG_ERR("Failed to connect - door-open event buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
     }
 
-    // TODO: Restart timer for next heartbeat (24 hours).
-    // For now, heartbeat timer is not implemented.
+    // Escalate: start next timer if under the cap.
+    if (stage < M_DOOR_OPEN_MAX_STAGE) {
+      uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
+
+      configureMailWindowTimer();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerSetDuration(duration);
+      m_pmic.TimerEnableInterrupt();
+      m_pmic.TimerStart();
+
+      setDoorOpenStage(stage + 1);
+      LOG_INF("Escalating: door-open timer stage %u started (%u seconds).",
+              stage + 1, duration);
+    } else {
+      LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
+      setDoorOpenStage(0);
+    }
+
+    // Recalibrate ADXL367 so door-close triggers a new accelerometer wake.
+    int recalResult = configureMotionSensor();
+    if (recalResult < 0) {
+      LOG_ERR("ADXL367 recalibration failed: %d", recalResult);
+    }
 
     LOG_INF("Timer wake handling complete.");
   }
@@ -393,83 +501,6 @@ namespace alc
       // Does not return.
     }
 
-    // =========================================================================
-    // Initialise timer state: Run short timer and wait for expiry
-    // =========================================================================
-    //
-    // This establishes the "ready for OPEN" state by ensuring TimerIsExpired()
-    // returns TRUE after fresh boot. The expired flag persists across System OFF.
-    //
-    // Cost: One-time 3-second blocking wait on fresh boot only.
-    // =========================================================================
-
-    constexpr uint32_t INIT_TIMER_SECS { 3 };
-    constexpr uint32_t POLL_INTERVAL_MS { 100 };
-    constexpr uint32_t TIMEOUT_MS { 5000 };  // Safety timeout.
-
-    LOG_INF("Initialising timer state (one-time %u second wait)...", INIT_TIMER_SECS);
-
-    // Configure timer mode (must be done before using the timer).
-    LOG_INF("Configuring timer for GP mode...");
-    int configResult = m_pmic.TimerConfigure(
-      Npm1300::TimerMode::GeneralPurpose,
-      Npm1300::TimerPrescaler::Slow
-    );
-    if (configResult < 0) {
-      LOG_ERR("Failed to configure timer: %d", configResult);
-    }
-
-    // Clear any stale state from PMIC (persists across MCU resets).
-    LOG_INF("Stopping any running timer...");
-    m_pmic.TimerStop();
-    k_msleep(10);  // Allow PMIC to process stop command.
-
-    LOG_INF("Clearing timer event flag...");
-    m_pmic.TimerClearEvent();
-    k_msleep(10);  // Allow PMIC to process clear command.
-
-    // Verify timer event is cleared.
-    if (m_pmic.TimerIsExpired()) {
-      LOG_WRN("Timer event flag still set after clear - clearing again.");
-      m_pmic.TimerClearEvent();
-      k_msleep(10);
-    }
-
-    // Start short initialisation timer.
-    LOG_INF("Starting %u second init timer...", INIT_TIMER_SECS);
-    int result = m_pmic.TimerSetDuration(INIT_TIMER_SECS);
-    if (result < 0) {
-      LOG_ERR("Failed to set init timer duration: %d", result);
-    }
-
-    result = m_pmic.TimerStart();
-    if (result < 0) {
-      LOG_ERR("Failed to start init timer: %d", result);
-    }
-
-    // Wait for timer to expire.
-    LOG_INF("Waiting for timer to expire...");
-    uint32_t elapsed { 0 };
-    while (!m_pmic.TimerIsExpired() && (elapsed < TIMEOUT_MS)) {
-      k_msleep(POLL_INTERVAL_MS);
-      elapsed += POLL_INTERVAL_MS;
-      if ((elapsed % 1000) == 0) {
-        LOG_INF("  ... %u ms elapsed, checking timer status", elapsed);
-        m_pmic.DebugTimerState();
-      }
-    }
-
-    if (m_pmic.TimerIsExpired()) {
-      LOG_INF("Init timer expired after %u ms - state ready.", elapsed);
-      // IMPORTANT: Do NOT clear the expired flag!
-      // Leaving it SET means TimerIsExpired() returns TRUE = ready for OPEN.
-    } else {
-      LOG_ERR("Init timer did not expire within timeout! (elapsed=%u ms)", elapsed);
-      // Force the expired state by stopping timer - this is a fallback.
-      m_pmic.TimerStop();
-      // Note: Without the expired flag set, first motion will be treated as CLOSE.
-      // This is a bug, but at least the device won't be stuck.
-    }
   }
 
   // ========== Provisioning Mode Handler ==========
@@ -625,28 +656,33 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened)
+  bool App::sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
   {
     char topic[64];
     char message[256];
 
+    const char* eventName = (type == EventType::MailboxOpen) ? "mailbox_open" : "mailbox_visited";
+
     // TODO: When RTC is fitted, timestamp will be Unix epoch.
     // For now it's seconds since boot.
     int len { snprintf(message, sizeof(message),
-                       "{\"event\":\"mail_delivered\","
+                       "{\"event\":\"%s\","
                        "\"timestamp\":%u,"
                        "\"owner_intervened\":%s}",
+                       eventName,
                        timestamp,
                        ownerIntervened ? "true" : "false") };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
 
-    LOG_INF("Sending mail delivered event: %s", message);
+    LOG_INF("Sending event: %s", message);
 
-    if (!m_mqtt.Publish(topic, message, len, false)) {
-      LOG_ERR("Failed to publish mail event!");
-      return false;
-    }
+    // TODO: Re-enable when FIFO testing complete.
+    // if (!m_mqtt.Publish(topic, message, len, false)) {
+    //   LOG_ERR("Failed to publish event!");
+    //   return false;
+    // }
+    LOG_INF("(MQTT publish suppressed for FIFO testing)");
 
     return true;
   }
@@ -683,7 +719,7 @@ namespace alc
                 i + 1, count, event.timestamp, event.owner_intervened);
       }
 
-      if (!sendMailDeliveredEvent(event.timestamp, ownerIntervened)) {
+      if (!sendMailboxEvent(event.timestamp, ownerIntervened, event.event_type)) {
         LOG_ERR("Failed to send buffered event %d", i);
         allSent = false;
         // Continue trying to send remaining events.
@@ -1113,45 +1149,92 @@ namespace alc
 
     LOG_INF("Configuring ADXL367 for motion wake-up...");
 
-    // Put in standby for configuration.
-    result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Standby);
-    if (result < 0) { return result; }
+    // Device is in Standby after Init() soft reset.
+    // All register changes (0x00-0x2D) must be made in Standby per datasheet.
 
-    // Configure activity detection using current config values.
-    Adxl367::ActivityConfig actConfig {
+    // =========================================================================
+    // Loop mode startup sequence (from datasheet):
+    // 1. Configure dummy thresholds to force activity→inactivity cycle.
+    // 2. Enter measurement + autosleep.
+    // 3. Wait for AWAKE to clear.
+    // 4. Reconfigure with real thresholds (0x20-0x26 only, NOT 0x27).
+    // =========================================================================
+
+    // Step 1: Dummy config — act threshold below noise, inact threshold > 1g.
+    LOG_INF("Loop mode init: setting dummy thresholds...");
+    Adxl367::ActivityConfig dummyConfig {
       .activityMode = Adxl367::ActivityMode::Referenced,
-      .inactivityMode = Adxl367::ActivityMode::Absolute,
+      .inactivityMode = Adxl367::ActivityMode::Referenced,
       .linkLoop = Adxl367::LinkLoopMode::Loop,
-      .activityThreshold = m_config.activityThresholdMg,
-      .activityTime = m_config.activityTime,
-      .inactivityThreshold = m_config.inactivityThresholdMg,
-      .inactivityTime = m_config.inactivityTime
+      .activityThreshold = 1,       // 1mg — below noise, triggers immediately.
+      .activityTime = 0,            // No delay.
+      .inactivityThreshold = 8000,  // Max range — triggers immediately when still.
+      .inactivityTime = 0           // No delay.
     };
 
-    LOG_INF("ADXL367 config: act=%umg/%u, inact=%umg/%u",
-            actConfig.activityThreshold, actConfig.activityTime,
-            actConfig.inactivityThreshold, actConfig.inactivityTime);
-
-    result = m_motion.ConfigureActivity(actConfig);
+    result = m_motion.ConfigureActivity(dummyConfig);
     if (result < 0) { return result; }
 
-    // Map AWAKE signal to INT1 (active high for System OFF wake).
+    // FIFO (0x28-0x29) - stream mode, XYZ channels.
+    result = m_motion.ConfigureFifo(Adxl367::FifoMode::Stream);
+    if (result < 0) { return result; }
+
+    // Interrupt mapping (0x2A-0x2B).
     result = m_motion.ConfigureInterrupt(Adxl367::IntPin::Int1, true, false);
     if (result < 0) { return result; }
 
-    // Set range.
+    // Filter control (0x2C) - range and ODR.
     result = m_motion.SetRange(Adxl367::Range::Range2g);
     if (result < 0) { return result; }
 
-    // Enable wake-up mode (180 nA operation).
-    result = m_motion.EnableWakeupMode(Adxl367::WakeupRate::Rate6Sps);
+    result = m_motion.SetOdr(Adxl367::ODR::Hz50);
     if (result < 0) { return result; }
 
-    // Enter measurement mode.
-    result = m_motion.SetOperatingMode(Adxl367::OperatingMode::Measurement);
+    // Wake-up rate (TIMER_CTL 0x39) — 12.5 SPS for fastest FIFO capture.
+    result = m_motion.SetWakeupRate(Adxl367::WakeupRate::Rate12Sps);
     if (result < 0) { return result; }
 
-    LOG_INF("ADXL367 configured: wake-up mode, AWAKE→INT1.");
+    // Step 2: Enter measurement mode with autosleep (POWER_CTL = 0x06).
+    result = m_motion.EnableMeasurementAutosleep();
+    if (result < 0) { return result; }
+
+    // Step 3: Wait for AWAKE to clear (~100ms + 1/ODR per datasheet).
+    LOG_INF("Waiting for AWAKE to clear (loop mode init)...");
+    {
+      constexpr uint32_t M_INIT_TIMEOUT_MS { 2000 };
+      constexpr uint32_t M_INIT_POLL_MS { 10 };
+      uint32_t elapsed { 0 };
+
+      while (m_motion.IsAwake() && (elapsed < M_INIT_TIMEOUT_MS)) {
+        k_msleep(M_INIT_POLL_MS);
+        elapsed += M_INIT_POLL_MS;
+      }
+
+      if (m_motion.IsAwake()) {
+        LOG_ERR("AWAKE did not clear during loop mode init (timeout %u ms)!", M_INIT_TIMEOUT_MS);
+        return -ETIMEDOUT;
+      }
+
+      LOG_INF("AWAKE cleared after %u ms — loop mode initialised.", elapsed);
+    }
+
+    // Step 4: Reconfigure with real thresholds (0x20-0x26 only, NOT 0x27).
+    LOG_INF("Reconfiguring real thresholds...");
+
+    result = m_motion.SetActivityThreshold(m_config.activityThresholdMg);
+    if (result < 0) { return result; }
+
+    result = m_motion.SetInactivityThreshold(m_config.inactivityThresholdMg);
+    if (result < 0) { return result; }
+
+    result = m_motion.SetInactivityTime(m_config.inactivityTime);
+    if (result < 0) { return result; }
+
+    LOG_INF("ADXL367 config: act=%umg/%u, inact=%umg/%u",
+            m_config.activityThresholdMg, m_config.activityTime,
+            m_config.inactivityThresholdMg, m_config.inactivityTime);
+
+    LOG_INF("ADXL367 configured: loop mode + autosleep, AWAKE→INT1.");
     return 0;
   }
 
@@ -1207,11 +1290,11 @@ namespace alc
 
     nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_HIGH);
 
-    // Future: Configure PMIC GPIO for timer wake (heartbeat).
-    // nrf_gpio_cfg_input(PIN_PMIC_INT, NRF_GPIO_PIN_PULLDOWN);
-    // nrf_gpio_cfg_sense_set(PIN_PMIC_INT, NRF_GPIO_PIN_SENSE_HIGH);
+    // Configure PMIC GPIO for timer wake (door-open / heartbeat).
+    nrf_gpio_cfg_input(PIN_PMIC_INT, NRF_GPIO_PIN_PULLDOWN);
+    nrf_gpio_cfg_sense_set(PIN_PMIC_INT, NRF_GPIO_PIN_SENSE_HIGH);
 
-    LOG_INF("Wake sources configured: Accel (P0.%d)", PIN_ACCEL_INT);
+    LOG_INF("Wake sources configured: Accel (P0.%d), PMIC (P0.%d)", PIN_ACCEL_INT, PIN_PMIC_INT);
   }
 
   void App::shutdownModem()

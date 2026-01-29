@@ -118,6 +118,7 @@ void initRetainedState()
     g_retained.event_count = 0;
     g_retained.max_events = DEFAULT_MAX_BUFFERED_EVENTS;
     g_retained.enabled = false;  // Start in provisioning mode.
+    g_retained.door_open_stage = 0;
     g_retained.poll_interval = DEFAULT_POLL_INTERVAL;
     memset(g_retained.events, 0, sizeof(g_retained.events));
     s_valid = true;
@@ -158,7 +159,7 @@ uint8_t getMaxBufferedEvents()
     return g_retained.max_events;
 }
 
-void bufferMailEvent(uint32_t timestamp, bool ownerIntervened)
+void bufferMailEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
 {
     // If buffer is full, drop oldest event.
     if (g_retained.event_count >= g_retained.max_events) {
@@ -174,10 +175,12 @@ void bufferMailEvent(uint32_t timestamp, bool ownerIntervened)
     BufferedEvent& newEvent = g_retained.events[g_retained.event_count];
     newEvent.timestamp = timestamp;
     newEvent.owner_intervened = ownerIntervened;
+    newEvent.event_type = type;
     g_retained.event_count++;
 
-    LOG_INF("Buffered event %d: timestamp=%u, owner_intervened=%d",
-            g_retained.event_count, timestamp, ownerIntervened);
+    const char* typeStr = (type == EventType::MailboxOpen) ? "mailbox_open" : "mailbox_visited";
+    LOG_INF("Buffered event %d: type=%s, timestamp=%u, owner_intervened=%d",
+            g_retained.event_count, typeStr, timestamp, ownerIntervened);
 
     saveState();
 }
@@ -204,6 +207,24 @@ void clearBufferedEvents()
         g_retained.event_count = 0;
         saveState();
     }
+}
+
+void setDoorOpenStage(uint8_t stage)
+{
+    if (stage > 3) {
+        stage = 3;
+    }
+
+    if (g_retained.door_open_stage != stage) {
+        g_retained.door_open_stage = stage;
+        LOG_INF("Door-open stage set to %u.", stage);
+        saveState();
+    }
+}
+
+uint8_t getDoorOpenStage()
+{
+    return g_retained.door_open_stage;
 }
 
 void setEnabled(bool enabled)

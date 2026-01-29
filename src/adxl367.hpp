@@ -11,7 +11,6 @@
  * - MQTT-configurable thresholds
  * 
  * Removed features not needed for mailbox monitoring:
- * - FIFO buffering
  * - Tap detection
  * - Temperature sensing
  * - Data streaming
@@ -63,6 +62,22 @@ namespace alc
         Rate1_5Sps = 3    ///< 1.5 samples/sec (lowest power).
       };
 
+      enum class ODR : uint8_t {
+        Hz12_5 = 0,   ///< 12.5 Hz.
+        Hz25   = 1,   ///< 25 Hz.
+        Hz50   = 2,   ///< 50 Hz.
+        Hz100  = 3,   ///< 100 Hz.
+        Hz200  = 4,   ///< 200 Hz.
+        Hz400  = 5    ///< 400 Hz.
+      };
+
+      enum class FifoMode : uint8_t {
+        Disabled    = 0,  ///< FIFO disabled.
+        OldestSaved = 1,  ///< Fills then stops.
+        Stream      = 2,  ///< Always contains most recent data.
+        Triggered   = 3   ///< Captures around activity event.
+      };
+
       enum class IntPin : uint8_t {
         Int1 = 1,
         Int2 = 2
@@ -75,9 +90,22 @@ namespace alc
        */
       struct Status {
         bool dataReady;          ///< New data available.
+        bool fifoReady;          ///< FIFO has at least one sample.
+        bool fifoWatermark;      ///< FIFO contains >= watermark samples.
+        bool fifoOverrun;        ///< FIFO has overrun.
         bool activityDetected;   ///< Activity detected.
         bool inactivityDetected; ///< Inactivity detected.
         bool awake;              ///< Device is in awake state.
+        bool errUserRegs;        ///< SEU error in user registers.
+      };
+
+      /**
+       * @brief Single XYZ sample from FIFO (converted to mg).
+       */
+      struct FifoSample {
+        int16_t x;   ///< X-axis in mg.
+        int16_t y;   ///< Y-axis in mg.
+        int16_t z;   ///< Z-axis in mg.
       };
 
       /**
@@ -104,11 +132,11 @@ namespace alc
        */
       static constexpr ActivityConfig DEFAULT_MAILBOX_CONFIG {
         .activityMode = ActivityMode::Referenced,
-        .inactivityMode = ActivityMode::Absolute,
+        .inactivityMode = ActivityMode::Referenced,
         .linkLoop = LinkLoopMode::Loop,
         .activityThreshold = 250,     // 250mg - detect lid movement.
         .activityTime = 1,            // 1 sample.
-        .inactivityThreshold = 1200,  // 1.2g - above gravity for absolute.
+        .inactivityThreshold = 250,   // 250mg - referenced mode, change from ref.
         .inactivityTime = 10          // ~1.6s at 6 SPS.
       };
 
@@ -159,6 +187,35 @@ namespace alc
        */
       int EnableWakeupMode(WakeupRate rate = WakeupRate::Rate6Sps);
 
+      /**
+       * @brief Set wake-up sampling rate without enabling wake-up mode.
+       *
+       * Sets TIMER_CTL[7:6] wake-up rate. Used with autosleep mode where
+       * the device autonomously enters wake-up mode at this rate.
+       *
+       * @param rate Wake-up sampling rate.
+       * @return 0 on success, negative error code on failure.
+       */
+      int SetWakeupRate(WakeupRate rate);
+
+      /**
+       * @brief Disable wake-up mode (switch to full ODR measurement).
+       * @return 0 on success, negative error code on failure.
+       */
+      int DisableWakeupMode();
+
+      /**
+       * @brief Enter measurement mode with autosleep enabled.
+       *
+       * Writes POWER_CTL = 0x07 (MEASURE=10, AUTOSLEEP=1).
+       * In loop mode, autosleep causes the device to enter wake-up mode
+       * autonomously when inactivity is detected, and return to measurement
+       * mode when activity is detected.
+       *
+       * @return 0 on success, negative error code on failure.
+       */
+      int EnableMeasurementAutosleep();
+
       // ========== Configuration ==========
 
       /**
@@ -167,6 +224,13 @@ namespace alc
        * @return 0 on success, negative error code on failure.
        */
       int SetRange(Range range);
+
+      /**
+       * @brief Set output data rate.
+       * @param odr Output data rate.
+       * @return 0 on success, negative error code on failure.
+       */
+      int SetOdr(ODR odr);
 
       /**
        * @brief Configure activity/inactivity detection.
@@ -192,6 +256,37 @@ namespace alc
        */
       int ConfigureInterrupt(IntPin pin, bool awake, bool activeLow = false);
 
+      // ========== FIFO ==========
+
+      /**
+       * @brief Configure FIFO mode and channel selection.
+       * @param mode FIFO operating mode.
+       * @param storeXyz Store X, Y, Z channels (the only option we use).
+       * @return 0 on success, negative error code on failure.
+       */
+      int ConfigureFifo(FifoMode mode);
+
+      /**
+       * @brief Read number of samples currently in FIFO.
+       * @param entries Reference to store the count.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadFifoEntries(uint16_t& entries);
+
+      /**
+       * @brief Read all available FIFO data as XYZ sample sets.
+       *
+       * Reads FIFO_ENTRIES, then bulk-reads from I2C_FIFO_DATA (0x18).
+       * Each sample is 2 bytes: D[15:14]=channel ID, D[13:0]=signed 14-bit data.
+       * Samples arrive in X, Y, Z order (3 samples per set).
+       *
+       * @param samples Output buffer for decoded XYZ samples.
+       * @param maxSets Maximum number of XYZ sets the buffer can hold.
+       * @param setsRead Number of complete XYZ sets actually read.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadFifo(FifoSample* samples, uint16_t maxSets, uint16_t& setsRead);
+
       // ========== Status ==========
 
       /**
@@ -209,6 +304,33 @@ namespace alc
        * @return True if awake (motion detected).
        */
       bool IsAwake();
+
+      // ========== Data Register Reads ==========
+
+      /**
+       * @brief Read current XYZ acceleration from data registers.
+       *
+       * Reads XDATA_H/L, YDATA_H/L, ZDATA_H/L and converts to mg.
+       * Works in both measurement and wake-up modes.
+       *
+       * @param x X-axis acceleration in mg.
+       * @param y Y-axis acceleration in mg.
+       * @param z Z-axis acceleration in mg.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadAxes(int16_t& x, int16_t& y, int16_t& z);
+
+      /**
+       * @brief Read raw temperature value from data registers.
+       *
+       * Returns the raw 14-bit ADC value. To convert to degrees C:
+       *   tempC = (rawValue - tempBias) * tempSlope
+       * where tempBias and tempSlope are device-specific (see datasheet).
+       *
+       * @param tempRaw Raw 14-bit temperature ADC value.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadTemperature(int16_t& tempRaw);
 
       // ========== Threshold Updates (for MQTT tuning) ==========
 
@@ -243,6 +365,14 @@ namespace alc
        */
       void PrintConfiguration();
 
+      /**
+       * @brief Read a register for debug purposes.
+       * @param reg Register address.
+       * @param value Reference to store the value.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadRegisterDebug(uint8_t reg, uint8_t& value);
+
     private:
       const struct device* m_i2c;
       uint8_t m_i2cAddr;
@@ -252,6 +382,7 @@ namespace alc
       int writeRegister(uint8_t reg, uint8_t value);
       int readRegister(uint8_t reg, uint8_t& value);
       int updateRegister(uint8_t reg, uint8_t value, uint8_t mask);
+      int readBurst(uint8_t reg, uint8_t* buffer, uint16_t length);
 
       // Conversion helpers.
       uint16_t mgToThreshold(uint16_t mg);
@@ -261,8 +392,8 @@ namespace alc
       int verifyDeviceId();
 
       // Constants.
-      static constexpr uint8_t STARTUP_DELAY_MS { 100 };
-      static constexpr uint8_t RESET_DELAY_MS { 8 };
+      static constexpr uint8_t M_STARTUP_DELAY_MS { 100 };
+      static constexpr uint8_t M_RESET_DELAY_MS { 8 };
   };
 
 } // namespace alc
