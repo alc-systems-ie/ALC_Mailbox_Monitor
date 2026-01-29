@@ -218,7 +218,7 @@ namespace alc
     //   start escalating door-open timer via nPM1300 (P0.02 wake).
     // =========================================================================
 
-    constexpr uint32_t M_AWAKE_TIMEOUT_MS { 30000 };  // 30 seconds.
+    constexpr uint32_t M_AWAKE_TIMEOUT_MS { 15000 };  // 15 seconds.
     constexpr uint32_t M_AWAKE_POLL_MS { 200 };
 
     // Home position (flat on desk — adjust for mounted orientation).

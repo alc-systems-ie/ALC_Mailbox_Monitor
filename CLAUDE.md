@@ -344,7 +344,7 @@ The approach uses a single-wake design with three event classifications:
 
 **Case 3 (Door left open):** AWAKE was HIGH at boot, device settles but NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
 
-**Important:** Case 3 triggers on position (NOT HOME), not on the 30s AWAKE timeout. Because `configureMotionSensor()` resets the ADXL367 reference on boot, AWAKE clears instantly when the box is stable in the open position — the 30s timeout never fires. The timeout remains only as a safety net for a genuinely stuck AWAKE signal.
+**Important:** Case 3 triggers on position (NOT HOME), not on the 15s AWAKE timeout. Because `configureMotionSensor()` resets the ADXL367 reference on boot, AWAKE clears instantly when the box is stable in the open position — the 30s timeout never fires. The timeout remains only as a safety net for a genuinely stuck AWAKE signal.
 
 ### Escalating Door-Open Timer
 
@@ -373,7 +373,7 @@ When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalati
 - P0.11 (ADXL367 INT1): Motion detection — always enabled.
 - P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
 
-**Power consideration:** During the initial wake, the MCU polls AWAKE briefly (typically 0ms when door is stable open, up to 30s safety timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
+**Power consideration:** During the initial wake, the MCU polls AWAKE briefly (typically 0ms when door is stable open, up to 15s safety timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
 
 ### FIFO Configuration
 
