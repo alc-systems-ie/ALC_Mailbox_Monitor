@@ -132,11 +132,11 @@ namespace alc
        */
       static constexpr ActivityConfig DEFAULT_MAILBOX_CONFIG {
         .activityMode = ActivityMode::Referenced,
-        .inactivityMode = ActivityMode::Absolute,
+        .inactivityMode = ActivityMode::Referenced,
         .linkLoop = LinkLoopMode::Loop,
         .activityThreshold = 250,     // 250mg - detect lid movement.
         .activityTime = 1,            // 1 sample.
-        .inactivityThreshold = 1200,  // 1.2g - above gravity for absolute.
+        .inactivityThreshold = 250,   // 250mg - referenced mode, change from ref.
         .inactivityTime = 10          // ~1.6s at 6 SPS.
       };
 
@@ -192,6 +192,18 @@ namespace alc
        * @return 0 on success, negative error code on failure.
        */
       int DisableWakeupMode();
+
+      /**
+       * @brief Enter measurement mode with autosleep enabled.
+       *
+       * Writes POWER_CTL = 0x07 (MEASURE=10, AUTOSLEEP=1).
+       * In loop mode, autosleep causes the device to enter wake-up mode
+       * autonomously when inactivity is detected, and return to measurement
+       * mode when activity is detected.
+       *
+       * @return 0 on success, negative error code on failure.
+       */
+      int EnableMeasurementAutosleep();
 
       // ========== Configuration ==========
 
@@ -282,6 +294,33 @@ namespace alc
        */
       bool IsAwake();
 
+      // ========== Data Register Reads ==========
+
+      /**
+       * @brief Read current XYZ acceleration from data registers.
+       *
+       * Reads XDATA_H/L, YDATA_H/L, ZDATA_H/L and converts to mg.
+       * Works in both measurement and wake-up modes.
+       *
+       * @param x X-axis acceleration in mg.
+       * @param y Y-axis acceleration in mg.
+       * @param z Z-axis acceleration in mg.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadAxes(int16_t& x, int16_t& y, int16_t& z);
+
+      /**
+       * @brief Read raw temperature value from data registers.
+       *
+       * Returns the raw 14-bit ADC value. To convert to degrees C:
+       *   tempC = (rawValue - tempBias) * tempSlope
+       * where tempBias and tempSlope are device-specific (see datasheet).
+       *
+       * @param tempRaw Raw 14-bit temperature ADC value.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadTemperature(int16_t& tempRaw);
+
       // ========== Threshold Updates (for MQTT tuning) ==========
 
       /**
@@ -314,6 +353,14 @@ namespace alc
        * @brief Print current configuration for debugging.
        */
       void PrintConfiguration();
+
+      /**
+       * @brief Read a register for debug purposes.
+       * @param reg Register address.
+       * @param value Reference to store the value.
+       * @return 0 on success, negative error code on failure.
+       */
+      int ReadRegisterDebug(uint8_t reg, uint8_t& value);
 
     private:
       const struct device* m_i2c;

@@ -21,13 +21,17 @@ minicom -D /dev/tty.usbmodem* -b 115200
 
 ## Architecture
 
-### State Machine (Timer-Based)
+### State Machine (Single-Wake)
 
-The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs:
+Single wake event per mail delivery cycle:
 
-1. **OPEN Event** (first motion): Timer expired → Start 240s timer → Sleep
-2. **CLOSE Event** (second motion within window): Timer running → Send MQTT "mail_delivered" → Sleep
-3. Timer expiry resets state automatically
+1. **System OFF**: Device sleeps (~180nA, ADXL367 wake-up mode)
+2. **Motion detected**: ADXL367 AWAKE rises → MCU wakes from System OFF
+3. **Poll AWAKE**: MCU stays awake polling until AWAKE clears (door closed)
+4. **Send event**: Connect to MQTT, send `mail_delivered`, disconnect
+5. **System OFF**: Return to sleep
+
+The nPM1300 GP Timer is used for fresh boot initialisation (3s timer to establish ready state) and may be used for future heartbeat timing. It is no longer part of the core open/close state machine.
 
 ### Source Files
 
@@ -81,7 +85,7 @@ The nPM1300 GP Timer persists across System OFF, eliminating flash storage needs
 | `mail_window` | uint32 | 240 | 1 | 86400 | seconds | Time window for open/close detection cycle |
 | `activity_threshold` | uint16 | 250 | 1 | 8000 | mg | Motion sensitivity for wake trigger |
 | `activity_time` | uint8 | 1 | 1 | 255 | samples | Consecutive samples above threshold to trigger |
-| `inactivity_threshold` | uint16 | 1200 | 1 | 8000 | mg | Threshold to return to inactive state |
+| `inactivity_threshold` | uint16 | 250 | 1 | 8000 | mg | Threshold to return to inactive state (referenced mode) |
 | `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
 | `max_buffered_events` | uint8 | 10 | 1 | 20 | events | Maximum mail events to buffer when offline |
 | `poll_interval` | uint16 | 60 | 10 | 300 | seconds | Provisioning mode wake/poll interval |
@@ -191,7 +195,7 @@ Device publishes to: `alc/{DEVICE_ID}/status`
   "mail_window": 240,
   "activity_threshold": 250,
   "activity_time": 1,
-  "inactivity_threshold": 1200,
+  "inactivity_threshold": 250,
   "inactivity_time": 10,
   "max_buffered_events": 10,
   "buffered_events": 0
@@ -286,54 +290,81 @@ The GPIO latch only captures **rising edges**. Before entering System OFF, the f
 
 See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
 
-### FIFO-Based Motion Analysis (WIP)
+### ADXL367 Loop Mode with Referenced Activity/Inactivity
 
-**Branch:** `feature/orientation-detection`
-
-The ADXL367 FIFO captures motion data *before* the MCU boots, solving the fast-delivery problem where open-to-close happens within the ~700ms boot time (too fast for two separate wake events).
+The ADXL367 uses **loop mode** with **referenced** activity and inactivity detection. Referenced mode compares acceleration against a reference point captured at the last state transition, rather than against an absolute value. This correctly detects orientation changes (lid open/close) that don't exceed absolute thresholds.
 
 **Configuration:**
+- Activity: Referenced, 250mg threshold, 1 sample
+- Inactivity: Referenced, 250mg threshold, 10 samples (~1.6s at 6 SPS)
+- Link/loop: Loop (auto-acknowledged, sequential act→inact)
+- Autosleep enabled (POWER_CTL bit 2): device autonomously switches between measurement and wake-up mode
+
+**Loop Mode Startup Sequence (required):**
+
+In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activity→inactivity cycle completes. The datasheet specifies a startup sequence to clear this:
+
+```cpp
+// 1. Configure with dummy thresholds (in Standby)
+//    Activity threshold = 1mg (below noise floor → triggers immediately)
+//    Inactivity threshold = 8000mg (full scale → triggers immediately)
+//    Both referenced mode, loop mode
+
+// 2. Enter measurement + autosleep (POWER_CTL = 0x06)
+//    This starts the loop state machine
+
+// 3. Wait for AWAKE=0 (~100ms)
+//    The dummy thresholds cause immediate activity→inactivity cycle
+
+// 4. Reconfigure ONLY threshold/timer registers (0x20-0x26)
+//    with real values (e.g. 250mg activity, 250mg inactivity)
+```
+
+**Critical: Do NOT write ACT_INACT_CTL (0x27) during step 4.** Writing the mode register while in measurement mode resets the loop state machine, causing AWAKE to stick HIGH again. Only write threshold and timer registers (0x20-0x26).
+
+**Behaviour:**
+- Device sleeps in home position (AWAKE=0, ~180nA wake-up mode)
+- Any movement exceeding 250mg from reference → AWAKE=1 (activity detected)
+- Device must settle within 250mg of a new reference for 10 samples → AWAKE=0
+- Device only returns to AWAKE=0 in its home position, not on an edge/tilted
+- If door is left open (different orientation from home), AWAKE stays HIGH
+
+**Register Naming Convention:**
+- Register addresses: `M_REG_` prefix (e.g. `M_REG_STATUS`, `M_REG_THRESH_ACT_H`)
+- Masks and constants: `M_` prefix (e.g. `M_AWAKE_MASK`, `M_WAKEUP_RATE_SHIFT`)
+
+**Data Register Format (ReadAxes, 0x0E-0x13):**
+- H[7:0] = D[13:6], L[7:2] = D[5:0], L[1:0] = reserved
+- Different from FIFO format (D[15:14]=channel ID, D[13:0]=signed 14-bit)
+
+### Motion Detection State Machine
+
+The new approach uses a single-wake design instead of the previous two-wake OPEN/CLOSE model:
+
+1. **Wake from System OFF** (ADXL367 AWAKE rising edge)
+2. **Poll AWAKE** until it clears (door closed / device returned to rest)
+   - Safety timeout prevents infinite wait if door left open
+3. **Read settled position** via `ReadAxes()` to confirm home orientation
+4. **Send mail_delivered event** via MQTT
+5. **Enter System OFF**
+
+The nPM1300 timer is no longer needed for the open/close state machine. It may still be used for heartbeat timing.
+
+**Power consideration:** MCU stays in standby polling I2C during the open period. With modem off, this is modest power draw. A door left open for minutes costs more than a quick open/close, but this is a rare edge case.
+
+### FIFO Configuration
+
 - FIFO mode: Stream (always contains most recent data)
 - Channels: XYZ only
-- Wake-up rate: 12.5 SPS (80ms per sample)
+- ODR: 50 Hz (in measurement mode), wake-up rate 6 SPS (in autosleep)
 - FIFO read register: 0x18 (I2C_FIFO_DATA), bulk read
 
 **FIFO Data Format (different from data registers):**
 - 16 bits per sample: D[15:14] = channel ID, D[13:0] = signed 14-bit data
-- Data register format (ReadAxes) uses H[7:0]=D[13:6], L[7:2]=D[5:0] — NOT interchangeable
 - Samples arrive in X, Y, Z order (3 samples per XYZ set)
 
-**Three-Way Event Classification:**
-
-During each wake, FIFO samples are analysed against a "home" position to classify the event:
-
-| Classification | Condition | Action |
-|---------------|-----------|--------|
-| Spurious bump | < 6 consecutive samples away from home | Ignore |
-| Mail delivery | ≥ 6 consecutive away + returned home | Send notification |
-| Door left open | ≥ 6 consecutive away + NOT at home | TBD |
-
-- "Away from home" = Y or Z deviation > activity threshold (250mg) from home position
-- 6 samples at 12.5 SPS ≈ 500ms of sustained displacement
-- Home position currently set for flat testing: Y=0mg, Z=-1000mg (gravity)
-- Tolerance uses the configurable activity threshold (250mg default)
-
-**Testing Results (flat orientation):**
-- Bump: 0/13 away, significant_motion=NO, atHome=YES → correctly ignored
-- Open/close: 12/21 away, significant_motion=YES, atHome=YES → correctly detected
-
 **Known Issues / Quirks:**
-- `FIFO_ENTRIES` register reports 512 (full capacity), not valid sample count; zero-filtering used instead
-- STATUS register is at 0x0B (was incorrectly coded as 0x11/YDATA_L — fixed in commit 25ad5ac)
-- Wake-up mode samples at wake-up rate (12.5 SPS), not ODR, even after activity detection
-- Disabling wake-up mode mid-measurement doesn't change rate and causes INT1 glitch on re-enable
 - `mail_delivered` MQTT publish currently suppressed for testing
-
-**TODO:**
-- Handle "door left open" case (case 3)
-- Wire classification into OPEN/CLOSE state machine to suppress spurious events
-- Adjust HOME_Y/HOME_Z for actual mounted orientation
-- Re-enable MQTT publish when logic is finalised
 - Main stack increased to 8K for analysis buffers — review if this can be reduced
 
 ### Event Buffering (NVS Flash)

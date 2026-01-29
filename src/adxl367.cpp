@@ -16,6 +16,16 @@ namespace alc {
   // Status.
   constexpr uint8_t M_REG_STATUS          { 0x0B };
 
+  // Data registers (14-bit: H[7:0]=D[13:6], L[7:2]=D[5:0], L[1:0]=reserved).
+  constexpr uint8_t M_REG_XDATA_H         { 0x0E };
+  constexpr uint8_t M_REG_XDATA_L         { 0x0F };
+  constexpr uint8_t M_REG_YDATA_H         { 0x10 };
+  constexpr uint8_t M_REG_YDATA_L         { 0x11 };
+  constexpr uint8_t M_REG_ZDATA_H         { 0x12 };
+  constexpr uint8_t M_REG_ZDATA_L         { 0x13 };
+  constexpr uint8_t M_REG_TEMP_H          { 0x14 };
+  constexpr uint8_t M_REG_TEMP_L          { 0x15 };
+
   // FIFO.
   constexpr uint8_t M_REG_FIFO_ENTRIES_L  { 0x0C };
   constexpr uint8_t M_REG_FIFO_ENTRIES_H  { 0x0D };
@@ -299,6 +309,22 @@ namespace alc {
     return 0;
   }
 
+  int Adxl367::EnableMeasurementAutosleep()
+  {
+    // POWER_CTL = 0x07: MEASURE=10 (measurement), AUTOSLEEP=1.
+    // No explicit WAKEUP bit — autosleep handles the transition to wake-up mode.
+    constexpr uint8_t M_POWER_CTL_MEAS_AUTOSLEEP { 0x06 };
+    int result { writeRegister(M_REG_POWER_CTL, M_POWER_CTL_MEAS_AUTOSLEEP) };
+    if (result < 0) {
+      LOG_ERR("Failed to enable measurement+autosleep: %d!", result);
+      return result;
+    }
+
+    LOG_INF("Measurement mode with autosleep enabled (POWER_CTL=0x%02X).",
+            M_POWER_CTL_MEAS_AUTOSLEEP);
+    return 0;
+  }
+
   // ========== Configuration ==========
 
   int Adxl367::SetRange(Range range)
@@ -552,6 +578,56 @@ namespace alc {
     return status.awake;
   }
 
+  // ========== Data Register Reads ==========
+
+  int Adxl367::ReadAxes(int16_t& x, int16_t& y, int16_t& z)
+  {
+    // Bulk read 6 bytes: XDATA_H, XDATA_L, YDATA_H, YDATA_L, ZDATA_H, ZDATA_L.
+    uint8_t raw[6];
+    int result { readBurst(M_REG_XDATA_H, raw, 6) };
+    if (result < 0) {
+      LOG_ERR("Failed to read axes: %d!", result);
+      return result;
+    }
+
+    // Data register format: H[7:0]=D[13:6], L[7:2]=D[5:0], L[1:0]=reserved.
+    // Combine to 14-bit signed value, then convert to mg.
+    float scale { getScaleFactor() };
+
+    auto decode = [scale](uint8_t hi, uint8_t lo) -> int16_t {
+      int16_t rawVal { static_cast<int16_t>((hi << 6) | (lo >> 2)) };
+      // Sign-extend from 14-bit.
+      if (rawVal & 0x2000) {
+        rawVal |= static_cast<int16_t>(0xC000);
+      }
+      return static_cast<int16_t>(static_cast<float>(rawVal) * scale);
+    };
+
+    x = decode(raw[0], raw[1]);
+    y = decode(raw[2], raw[3]);
+    z = decode(raw[4], raw[5]);
+
+    return 0;
+  }
+
+  int Adxl367::ReadTemperature(int16_t& tempRaw)
+  {
+    uint8_t raw[2];
+    int result { readBurst(M_REG_TEMP_H, raw, 2) };
+    if (result < 0) {
+      LOG_ERR("Failed to read temperature: %d!", result);
+      return result;
+    }
+
+    // Same format as data registers: H[7:0]=D[13:6], L[7:2]=D[5:0].
+    tempRaw = static_cast<int16_t>((raw[0] << 6) | (raw[1] >> 2));
+    if (tempRaw & 0x2000) {
+      tempRaw |= static_cast<int16_t>(0xC000);
+    }
+
+    return 0;
+  }
+
   // ========== Threshold Updates ==========
 
   int Adxl367::SetActivityThreshold(uint16_t thresholdMg)
@@ -612,6 +688,11 @@ namespace alc {
     }
 
     LOG_INF("=============================================");
+  }
+
+  int Adxl367::ReadRegisterDebug(uint8_t reg, uint8_t& value)
+  {
+    return readRegister(reg, value);
   }
 
   // ========== I2C Helpers ==========

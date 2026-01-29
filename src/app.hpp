@@ -4,18 +4,18 @@
  * @file app.hpp
  * @brief ALC Mailbox Monitor Application.
  *
- * Simplified state machine for detecting mail delivery using nPM1300 GP Timer:
+ * Single-wake state machine for detecting mail delivery:
  *
  * Logic:
  * 1. Device sleeps in System OFF (nA power consumption).
  * 2. Motion detected → ADXL367 AWAKE signal wakes device.
- * 3. Check if nPM1300 timer is running:
- *    - If timer NOT running: Start 4-minute timer → OPEN event → sleep
- *    - If timer IS running: Stop timer → CLOSE event → send MQTT → sleep
- * 4. Return to System OFF.
+ * 3. MCU polls AWAKE until it clears (door closed / device at rest).
+ * 4. Send MQTT "mail_delivered" notification.
+ * 5. Return to System OFF.
  *
- * The nPM1300 timer persists across MCU System OFF, eliminating the need
- * for retained RAM or settings-based time persistence.
+ * ADXL367 uses referenced activity/inactivity in loop mode with autosleep.
+ * AWAKE stays HIGH while device is displaced from its rest position and
+ * only clears when returned to the home orientation.
  *
  * Active wake sources:
  * - ADXL367 INT1 (P0.11): Motion detection
@@ -48,7 +48,7 @@ namespace alc
   // ADXL367 defaults (configurable via MQTT).
   constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 250 };   // Activity threshold in mg.
   constexpr uint8_t M_ACTIVITY_TIME { 1 };              // Activity time in samples.
-  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 1200 };// Inactivity threshold in mg.
+  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 250 }; // Inactivity threshold in mg (referenced mode).
   constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
 
   // Provisioning mode poll interval limits (seconds).
@@ -146,11 +146,10 @@ namespace alc
       // ========== Wake Handling ==========
 
       /**
-       * @brief Handle motion wake - core state machine logic.
+       * @brief Handle motion wake - single-wake mail detection.
        *
-       * Uses nPM1300 timer to determine event type:
-       * - Timer not running → OPEN event → start timer
-       * - Timer running → CLOSE event → stop timer, send MQTT
+       * Polls AWAKE until device returns to rest, then sends mail event.
+       * MCU stays awake during the entire open period.
        */
       void handleMotionWake();
 
