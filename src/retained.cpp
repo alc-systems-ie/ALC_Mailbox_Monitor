@@ -164,7 +164,7 @@ uint8_t getMaxBufferedEvents()
     return g_retained.max_events;
 }
 
-void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
+void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type, uint8_t doorOpenStage)
 {
     // If buffer is full, drop oldest event.
     if (g_retained.event_count >= g_retained.max_events) {
@@ -181,6 +181,7 @@ void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
     newEvent.timestamp = timestamp;
     newEvent.sms_suppress = smsSuppressed;
     newEvent.event_type = type;
+    newEvent.door_open_stage = doorOpenStage;
     g_retained.event_count++;
 
     const char* typeStr = (type == EventType::MailboxOpen) ? "mailbox_open" : "mailbox_visited";

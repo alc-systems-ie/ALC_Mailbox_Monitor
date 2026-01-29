@@ -13,4 +13,5 @@ target_sources(app PRIVATE
   src/npm1300.cpp
   src/fuel_gauge.cpp
   src/retained.cpp
+  src/diag_log.cpp
 )

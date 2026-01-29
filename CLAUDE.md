@@ -45,6 +45,7 @@ The nPM1300 GP Timer drives an escalating door-open notification sequence when t
 | `src/adxl367.cpp/hpp` | Accelerometer driver (I2C, 180nA wake mode) |
 | `src/npm1300.cpp/hpp` | PMIC driver (timer, battery, charging) |
 | `src/fuel_gauge.cpp/hpp` | Battery SoC estimation |
+| `src/diag_log.cpp/hpp` | Diagnostic wake log (NVS, 100-entry circular buffer) |
 
 ### Hardware Interfaces
 
@@ -89,6 +90,8 @@ All commands are sent as JSON to `alc/{DEVICE_ID}/commands` (retained messages r
 | `reset_config` | `{"reset_config": true}` | Reset all parameters to defaults |
 | `status_request` | `{"status_request": true}` | Publish current config to status topic |
 | `reset_device` | `{"reset_device": true}` | Reboot device, returns to provisioning mode |
+| `dump_log` | `{"dump_log": true}` | Publish diagnostic wake log to diagnostic topic |
+| `clear_log` | `{"clear_log": true}` | Clear diagnostic wake log |
 
 ### Adjustable Parameters
 
@@ -437,7 +440,7 @@ When sending multiple buffered events (catch-up after outage):
 - Most recent event sent with actual `sms_suppress` value
 - This prevents carers receiving a flood of SMS for stale events
 
-**Event Message Format:**
+**Event Message Format (`mailbox_visited`):**
 ```json
 {
   "event": "mailbox_visited",
@@ -446,9 +449,20 @@ When sending multiple buffered events (catch-up after outage):
 }
 ```
 
+**Event Message Format (`mailbox_open`):**
+```json
+{
+  "event": "mailbox_open",
+  "stage": 1,
+  "timestamp": 12345,
+  "sms_suppress": false
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `event` | string | `"mailbox_visited"` or `"mailbox_open"` (see below) |
+| `stage` | uint8 | Escalation stage (1-3), only present for `mailbox_open` events |
 | `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
 | `sms_suppress` | bool | `true` suppresses SMS notification |
 
@@ -459,6 +473,25 @@ When sending multiple buffered events (catch-up after outage):
 The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
 
 **Note on `sms_suppress`:** When catching up after connectivity outage, older buffered events are sent with `sms_suppress: true` to prevent SMS flood. Only the most recent event uses its actual value.
+
+### Diagnostic Wake Log
+
+A 100-entry circular buffer in NVS flash (`diaglog/entries` settings key) records every wake event with classification details for remote debugging.
+
+**Entry fields:** timestamp, AWAKE poll duration, settled XYZ position (mg), battery voltage, wake source, classification (Bump/MailboxVisited/DoorOpen/TimerWake/FreshBoot/Provisioning), door-open stage, AWAKE-at-boot state, active ADXL367 config.
+
+**MQTT commands:**
+- `{"dump_log": true}` — publishes log to `alc/{DEVICE_ID}/diagnostic` as JSON batches of 20 entries
+- `{"clear_log": true}` — clears the log
+
+**Diagnostic topic JSON format:**
+```json
+{"batch":0,"total":1,"entries":[
+  {"ts":5,"poll":200,"x":0,"y":0,"z":-1000,"bat":3800,"ws":1,"cls":1,"stg":0,"awake":true,"at":250,"it":10}
+]}
+```
+
+Field key: `ts`=timestamp, `poll`=awakePollMs, `x/y/z`=settled position, `bat`=battery mV, `ws`=wake source, `cls`=classification, `stg`=door-open stage, `awake`=AWAKE at boot, `at`=activity threshold, `it`=inactivity time.
 
 ### Power Budget
 
@@ -499,6 +532,7 @@ alc_mailbox_monitor/
 │   ├── adxl367.cpp/hpp
 │   ├── npm1300.cpp/hpp (+ npm1300_const.hpp)
 │   ├── fuel_gauge.cpp/hpp
+│   ├── diag_log.cpp/hpp
 │   ├── certificate.h
 │   └── LP803448_battery_model.h
 └── compile_commands.json → build/

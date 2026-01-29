@@ -61,6 +61,7 @@ struct BufferedEvent {
     uint32_t timestamp;       ///< Event time in seconds since boot (TODO: RTC epoch).
     bool sms_suppress;        ///< True to suppress SMS notification.
     EventType event_type;     ///< Type of event (visited or open).
+    uint8_t door_open_stage;  ///< Escalation stage (1-3) for mailbox_open events.
 };
 
 /**
@@ -70,7 +71,7 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D414951;  // "MAIQ" - version 6: sms_suppress rename + persisted config.
+    static constexpr uint32_t MAGIC = 0x4D414952;  // "MAIR" - version 7: door_open_stage in BufferedEvent.
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
@@ -143,7 +144,8 @@ uint8_t getMaxBufferedEvents();
  * @param smsSuppressed True to suppress SMS notification.
  * @param type Event type (MailboxVisited or MailboxOpen).
  */
-void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type = EventType::MailboxVisited);
+void bufferMailEvent(uint32_t timestamp, bool smsSuppressed,
+                     EventType type = EventType::MailboxVisited, uint8_t doorOpenStage = 0);
 
 /**
  * @brief Save the current g_retained state to flash.
