@@ -372,16 +372,18 @@ When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalati
 
 **Flow:**
 1. Case 3 detected → check `door_open_stage`. If already at max (3), do nothing.
-2. Otherwise start timer with `M_DOOR_OPEN_DURATIONS[stage]`, set `door_open_stage = stage + 1`.
+2. Stop any existing timer (`TimerStop()`), then start timer with `M_DOOR_OPEN_DURATIONS[stage]`, set `door_open_stage = stage + 1`.
 3. Timer expires → `handleTimerWake()` sends notification, checks if `stage < 3`.
 4. If under cap: start next timer, increment stage. If at cap: reset stage to 0, stop.
 5. Door close at any point (case 2): stop timer hardware, disable interrupt, reset stage to 0.
+
+**Edge case — gust of wind:** If the door is open and a gust triggers an accelerometer wake while a stage timer is running, the MCU boots, detects NOT HOME (case 3 again), and restarts the timer at the current stage. The existing timer is explicitly stopped before starting the new one to ensure deterministic behaviour. The stage does not advance — only a timer expiry advances the stage.
 
 **Wake sources for System OFF:**
 - P0.11 (ADXL367 INT1): Motion detection — always enabled.
 - P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
 
-**Power consideration:** MCU stays in standby polling I2C during the initial 30s open period. With modem off, this is modest power draw. After timeout, device enters System OFF and only wakes briefly on each timer expiry to send a notification.
+**Power consideration:** During the initial wake, the MCU polls AWAKE briefly (typically 0ms when door is stable open, up to 30s safety timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
 
 ### FIFO Configuration
 
