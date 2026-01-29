@@ -278,46 +278,54 @@ namespace alc
                   (abs(y - M_HOME_Y) < threshold) &&
                   (abs(z - M_HOME_Z) < threshold) };
 
-    LOG_INF("Position: %s", atHome ? "HOME" : "NOT HOME");
+    LOG_INF("Position: %s (threshold: %d mg)", atHome ? "HOME" : "NOT HOME", threshold);
+
+    // Estimate total event time: ~300ms boot overhead + elapsed polling.
+    constexpr uint32_t M_BOOT_OVERHEAD_MS { 300 };
+    uint32_t totalTime { M_BOOT_OVERHEAD_MS + elapsed + 100 /* settle delay */ };
 
     // =========================================================================
-    // Case 3: AWAKE timeout — door left open.
+    // Case 3: Device at rest but NOT at home — door left open.
+    // This triggers whether AWAKE timed out (30s) or cleared quickly (device
+    // settled in the open position after configureMotionSensor() recalibrated).
     // =========================================================================
-    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
-      if (!atHome) {
-        LOG_INF("╔════════════════════════════════════════╗");
-        LOG_INF("║       DOOR LEFT OPEN                   ║");
-        LOG_INF("╚════════════════════════════════════════╝");
+    if (!atHome) {
+      LOG_INF("╔════════════════════════════════════════╗");
+      LOG_INF("║       DOOR LEFT OPEN                   ║");
+      LOG_INF("╚════════════════════════════════════════╝");
+      LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
+              totalTime, M_BOOT_OVERHEAD_MS, elapsed);
 
-        uint8_t stage { getDoorOpenStage() };
+      uint8_t stage { getDoorOpenStage() };
 
-        // Already sent all 3 notifications — no more timers.
-        if (stage >= M_DOOR_OPEN_MAX_STAGE) {
-          LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
-          configureMotionSensor();
-          return;
-        }
-
-        // Start the next escalating timer (stage 0→1, 1→2, 2→3).
-        uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
-
-        configureMailWindowTimer();
-        m_pmic.TimerClearEvent();
-        m_pmic.TimerSetDuration(duration);
-        m_pmic.TimerEnableInterrupt();
-        m_pmic.TimerStart();
-
-        setDoorOpenStage(stage + 1);
-        LOG_INF("Door-open timer stage %u started: %u seconds. Entering System OFF.",
-                stage + 1, duration);
-
-        // Recalibrate ADXL367 so a door-close also triggers a wake.
+      // Already sent all 3 notifications — no more timers.
+      if (stage >= M_DOOR_OPEN_MAX_STAGE) {
+        LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
         configureMotionSensor();
-
         return;
       }
 
-      // AWAKE stuck but device is at home — recalibrate to clear.
+      // Start the next escalating timer (stage 0→1, 1→2, 2→3).
+      uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
+
+      configureMailWindowTimer();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerSetDuration(duration);
+      m_pmic.TimerEnableInterrupt();
+      m_pmic.TimerStart();
+
+      setDoorOpenStage(stage + 1);
+      LOG_INF("Door-open timer stage %u started: %u seconds. Entering System OFF.",
+              stage + 1, duration);
+
+      // Recalibrate ADXL367 so a door-close also triggers a wake.
+      configureMotionSensor();
+
+      return;
+    }
+
+    // AWAKE timed out but device is at home — recalibrate to clear.
+    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
       LOG_INF("AWAKE stuck at home - recalibrating ADXL367...");
       int recalResult { configureMotionSensor() };
       if (recalResult < 0) {
@@ -325,11 +333,6 @@ namespace alc
       } else {
         LOG_INF("Recalibration complete.");
       }
-    }
-
-    if (!atHome) {
-      LOG_WRN("Device at rest but NOT at home position - ignoring.");
-      return;
     }
 
     // =========================================================================
@@ -347,8 +350,10 @@ namespace alc
 
     // ===== MAIL DELIVERY =====
     LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║       MAIL DELIVERED!                  ║");
+    LOG_INF("║       MAILBOX VISITED                  ║");
     LOG_INF("╚════════════════════════════════════════╝");
+    LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
+            totalTime, M_BOOT_OVERHEAD_MS, elapsed);
 
     uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
     bool ownerIntervened { false };  // Placeholder for future Hall sensor.
