@@ -1,6 +1,5 @@
 #include "app.hpp"
 #include "retained.hpp"
-#include "diag_log.hpp"
 #include <zephyr/logging/log.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
@@ -69,7 +68,6 @@ namespace alc
     // Initialise event buffer (loads from NVS flash).
     // =========================================================================
     initEventBuffer();
-    diagLogInit();
 
     LOG_INF("════════════════════════════════════════");
 
@@ -235,7 +233,6 @@ namespace alc
     // =========================================================================
     if (!m_awakeAtBoot) {
       LOG_INF("Classification: BUMP (AWAKE cleared before boot)");
-      logDiagEvent(WakeClassification::Bump, 0, 0, 0, 0);
       LOG_INF("Ignoring spurious wake - returning to sleep.");
       return;
     }
@@ -296,7 +293,6 @@ namespace alc
       LOG_INF("╚════════════════════════════════════════╝");
       LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
               totalTime, M_BOOT_OVERHEAD_MS, elapsed);
-      logDiagEvent(WakeClassification::DoorOpen, static_cast<uint16_t>(elapsed), x, y, z);
 
       uint8_t stage { getDoorOpenStage() };
 
@@ -361,7 +357,6 @@ namespace alc
     LOG_INF("╚════════════════════════════════════════╝");
     LOG_INF("Event time: ~%u ms (boot ~%u ms + poll %u ms + settle 100 ms)",
             totalTime, M_BOOT_OVERHEAD_MS, elapsed);
-    logDiagEvent(WakeClassification::MailboxVisited, static_cast<uint16_t>(elapsed), x, y, z);
 
     uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
     bool smsSuppressed { false };
@@ -414,7 +409,6 @@ namespace alc
     }
 
     uint8_t stage { getDoorOpenStage() };
-    logDiagEvent(WakeClassification::TimerWake, 0, 0, 0, 0);
 
     // Door-open timer expired — send notification.
     LOG_INF("╔════════════════════════════════════════╗");
@@ -426,7 +420,7 @@ namespace alc
 
     // Buffer a mailbox_open event.
     uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-    bufferMailEvent(timestamp, false, EventType::MailboxOpen, stage);
+    bufferMailEvent(timestamp, false, EventType::MailboxOpen);
 
     // Initialise network hardware.
     if (!initNetworkHardware()) {
@@ -494,7 +488,6 @@ namespace alc
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║           FRESH BOOT / RESET           ║");
     LOG_INF("╚════════════════════════════════════════╝");
-    logDiagEvent(WakeClassification::FreshBoot, 0, 0, 0, 0);
 
     // =========================================================================
     // Check if device is enabled for normal operation.
@@ -668,8 +661,7 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type,
-                             uint8_t doorOpenStage)
+  bool App::sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
   {
     char topic[64];
     char message[256];
@@ -678,26 +670,13 @@ namespace alc
 
     // TODO: When RTC is fitted, timestamp will be Unix epoch.
     // For now it's seconds since boot.
-    int len;
-    if (type == EventType::MailboxOpen) {
-      len = snprintf(message, sizeof(message),
-                     "{\"event\":\"%s\","
-                     "\"stage\":%u,"
-                     "\"timestamp\":%u,"
-                     "\"sms_suppress\":%s}",
-                     eventName,
-                     doorOpenStage,
-                     timestamp,
-                     smsSuppressed ? "true" : "false");
-    } else {
-      len = snprintf(message, sizeof(message),
-                     "{\"event\":\"%s\","
-                     "\"timestamp\":%u,"
-                     "\"sms_suppress\":%s}",
-                     eventName,
-                     timestamp,
-                     smsSuppressed ? "true" : "false");
-    }
+    int len { snprintf(message, sizeof(message),
+                       "{\"event\":\"%s\","
+                       "\"timestamp\":%u,"
+                       "\"sms_suppress\":%s}",
+                       eventName,
+                       timestamp,
+                       smsSuppressed ? "true" : "false") };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
 
@@ -742,7 +721,7 @@ namespace alc
                 i + 1, count, event.timestamp, event.sms_suppress);
       }
 
-      if (!sendMailboxEvent(event.timestamp, smsSuppressed, event.event_type, event.door_open_stage)) {
+      if (!sendMailboxEvent(event.timestamp, smsSuppressed, event.event_type)) {
         LOG_ERR("Failed to send buffered event %d", i);
         allSent = false;
         // Continue trying to send remaining events.
@@ -987,12 +966,6 @@ namespace alc
     if (strstr(message, "\"poll_interval\"")) {
       return MqttCommand::SET_POLL_INTERVAL;
     }
-    if (strstr(message, "\"dump_log\"")) {
-      return MqttCommand::DUMP_LOG;
-    }
-    if (strstr(message, "\"clear_log\"")) {
-      return MqttCommand::CLEAR_LOG;
-    }
 
     return MqttCommand::UNKNOWN;
   }
@@ -1134,16 +1107,6 @@ namespace alc
           LOG_WRN("Invalid poll_interval value: %d (must be %d-%d).",
                   value, M_MIN_POLL_INTERVAL, M_MAX_POLL_INTERVAL);
         }
-        break;
-
-      case MqttCommand::DUMP_LOG:
-        LOG_INF("Diagnostic log dump requested.");
-        sendDiagnosticLog();
-        break;
-
-      case MqttCommand::CLEAR_LOG:
-        LOG_INF("Diagnostic log clear requested.");
-        diagLogClear();
         break;
 
       default:
@@ -1424,106 +1387,6 @@ namespace alc
     while (true) {
       k_sleep(K_FOREVER);
     }
-  }
-
-  // ========== Diagnostic Log ==========
-
-  void App::logDiagEvent(WakeClassification classification, uint16_t awakePollMs,
-                         int16_t x, int16_t y, int16_t z)
-  {
-    DiagLogEntry entry {};
-    entry.timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-    entry.awakePollMs = awakePollMs;
-    entry.settledX = x;
-    entry.settledY = y;
-    entry.settledZ = z;
-    entry.classification = classification;
-    entry.doorOpenStage = getDoorOpenStage();
-    entry.awakeAtBoot = m_awakeAtBoot;
-    entry.activityThresholdMg = m_config.activityThresholdMg;
-    entry.inactivityTime = m_config.inactivityTime;
-
-    // Read battery voltage.
-    Npm1300::SensorData sensorData;
-    if (m_pmic.ReadSensors(sensorData) == 0) {
-      entry.batteryMv = static_cast<uint16_t>(sensorData.voltage * 1000.0f);
-    }
-
-    // Wake source from current context (stored implicitly by Start flow).
-    // We don't have a member for it, but classification implies it.
-    entry.wakeSource = static_cast<uint8_t>(
-        (classification == WakeClassification::TimerWake) ? WakeSource::Timer :
-        (classification == WakeClassification::FreshBoot) ? WakeSource::PowerOn :
-        WakeSource::Accelerometer);
-
-    diagLogEvent(entry);
-    LOG_INF("Diag log: cls=%u poll=%u xyz=%d/%d/%d bat=%umV",
-            static_cast<uint8_t>(classification), awakePollMs, x, y, z, entry.batteryMv);
-  }
-
-  bool App::sendDiagnosticLog()
-  {
-    uint8_t count = diagLogCount();
-    LOG_INF("Sending diagnostic log (%d entries)...", count);
-
-    if (count == 0) {
-      // Send empty array.
-      char topic[64];
-      buildTopic(topic, sizeof(topic), M_SUFFIX_DIAGNOSTIC);
-      const char* msg = "{\"entries\":[],\"count\":0}";
-      return m_mqtt.Publish(topic, msg, strlen(msg), false);
-    }
-
-    // Send in batches of 20 to avoid oversized messages.
-    constexpr uint8_t BATCH_SIZE { 20 };
-    char topic[64];
-    buildTopic(topic, sizeof(topic), M_SUFFIX_DIAGNOSTIC);
-
-    for (uint8_t batch = 0; batch < count; batch += BATCH_SIZE) {
-      uint8_t batchEnd = (batch + BATCH_SIZE < count) ? batch + BATCH_SIZE : count;
-
-      // Build JSON. Each entry ~120 chars, batch of 20 ~2400 + overhead.
-      static char msg[3072];
-      int pos = snprintf(msg, sizeof(msg),
-                         "{\"batch\":%d,\"total\":%d,\"entries\":[",
-                         batch / BATCH_SIZE, (count + BATCH_SIZE - 1) / BATCH_SIZE);
-
-      for (uint8_t i = batch; i < batchEnd; i++) {
-        DiagLogEntry e;
-        if (!diagLogGet(i, e)) { continue; }
-
-        if (i > batch) {
-          pos += snprintf(msg + pos, sizeof(msg) - pos, ",");
-        }
-
-        pos += snprintf(msg + pos, sizeof(msg) - pos,
-                        "{\"ts\":%u,\"poll\":%u,\"x\":%d,\"y\":%d,\"z\":%d,"
-                        "\"bat\":%u,\"ws\":%u,\"cls\":%u,\"stg\":%u,"
-                        "\"awake\":%s,\"at\":%u,\"it\":%u}",
-                        e.timestamp, e.awakePollMs,
-                        e.settledX, e.settledY, e.settledZ,
-                        e.batteryMv, e.wakeSource,
-                        static_cast<uint8_t>(e.classification),
-                        e.doorOpenStage,
-                        e.awakeAtBoot ? "true" : "false",
-                        e.activityThresholdMg, e.inactivityTime);
-      }
-
-      pos += snprintf(msg + pos, sizeof(msg) - pos, "]}");
-
-      if (!m_mqtt.Publish(topic, msg, pos, false)) {
-        LOG_ERR("Failed to publish diagnostic batch %d!", batch / BATCH_SIZE);
-        return false;
-      }
-
-      // Small delay between batches.
-      if (batchEnd < count) {
-        k_msleep(500);
-      }
-    }
-
-    LOG_INF("Diagnostic log sent.");
-    return true;
   }
 
   // ========== Utility ==========

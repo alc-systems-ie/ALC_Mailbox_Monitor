@@ -31,7 +31,6 @@
 #include "mqtt.hpp"
 #include "npm1300.hpp"
 #include "retained.hpp"
-#include "diag_log.hpp"
 
 namespace alc
 {
@@ -99,8 +98,6 @@ namespace alc
     ENABLE,
     DISABLE,
     SET_POLL_INTERVAL,
-    DUMP_LOG,
-    CLEAR_LOG,
     UNKNOWN
   };
 
@@ -225,8 +222,7 @@ namespace alc
        * @param smsSuppressed Whether to suppress SMS notification.
        * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type,
-                           uint8_t doorOpenStage = 0);
+      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type);
 
       /**
        * @brief Send all buffered mail events.
@@ -259,17 +255,6 @@ namespace alc
       void collectMqttCommands();
 
       // ========== Command Handling ==========
-
-      /**
-       * @brief Send diagnostic log entries via MQTT.
-       */
-      bool sendDiagnosticLog();
-
-      /**
-       * @brief Log a diagnostic event with current device state.
-       */
-      void logDiagEvent(WakeClassification classification, uint16_t awakePollMs,
-                        int16_t x, int16_t y, int16_t z);
 
       MqttCommand parseCommand(const char* message, size_t length);
       void executeCommand(MqttCommand cmd, const char* message, size_t length);
@@ -334,7 +319,6 @@ namespace alc
       static constexpr const char* M_SUFFIX_BATTERY { "battery" };
       static constexpr const char* M_SUFFIX_HEARTBEAT { "heartbeat" };
       static constexpr const char* M_SUFFIX_COMMANDS { "commands" };
-      static constexpr const char* M_SUFFIX_DIAGNOSTIC { "diagnostic" };
 
       // GPIO pins for wake sources.
       static constexpr uint32_t PIN_ACCEL_INT { 11 };   // ADXL367 INT1.
