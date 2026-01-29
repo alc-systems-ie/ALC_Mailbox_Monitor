@@ -104,8 +104,8 @@ All commands are sent as JSON to `alc/{DEVICE_ID}/commands` (retained messages r
 
 ### Persistence Notes
 
-- ADXL367 parameters (`activity_threshold`, `activity_time`, `inactivity_threshold`, `inactivity_time`, `mail_window`) take effect immediately but do **not** persist across System OFF.
-- `enabled`, `poll_interval`, `max_buffered_events`, and `door_open_stage` are stored in NVS flash and persist across System OFF.
+- All configurable parameters (`activity_threshold`, `activity_time`, `inactivity_threshold`, `inactivity_time`, `mail_window`, `max_buffered_events`, `poll_interval`, `enabled`, `door_open_stage`) are stored in NVS flash and persist across System OFF.
+- ADXL367 parameters also take effect immediately when set via MQTT command.
 
 ### Device Reset Behaviour
 
@@ -148,14 +148,19 @@ Commands should be **retained messages**. The enable/disable commands are automa
 
 ### State Persistence
 
-The `enabled`, `poll_interval`, and `door_open_stage` values are stored in NVS flash and persist across System OFF cycles:
+All runtime configuration is stored in NVS flash and persists across System OFF cycles:
 
 ```cpp
 struct RetainedState {
     ...
-    bool enabled;              // Device operational state
-    uint8_t door_open_stage;   // Escalating door-open timer (0=inactive, 1-3)
-    uint16_t poll_interval;    // Provisioning poll interval (seconds)
+    bool enabled;                   // Device operational state
+    uint8_t door_open_stage;        // Escalating door-open timer (0=inactive, 1-3)
+    uint16_t poll_interval;         // Provisioning poll interval (seconds)
+    uint32_t mailWindowSecs;        // Open/close cycle timeout
+    uint16_t activityThresholdMg;   // ADXL367 activity threshold
+    uint8_t activityTime;           // ADXL367 activity time
+    uint16_t inactivityThresholdMg; // ADXL367 inactivity threshold
+    uint8_t inactivityTime;         // ADXL367 inactivity time
     ...
 };
 ```
@@ -197,7 +202,7 @@ Device publishes to: `alc/{DEVICE_ID}/status`
 ### Implementation Notes
 
 - Commands should be **retained messages** so device receives on next connection
-- Configuration persists only until next System OFF (no flash storage)
+- All configuration parameters persist across System OFF via NVS flash
 - ADXL367 parameters reconfigure immediately after command received
 - `mail_window` changes affect the next open/close cycle
 
@@ -399,18 +404,23 @@ enum class EventType : uint8_t {
 
 struct BufferedEvent {
     uint32_t timestamp;       // Seconds since boot (TODO: RTC epoch)
-    bool owner_intervened;    // Future: hall sensor detected
+    bool sms_suppress;        // True to suppress SMS notification
     EventType event_type;     // mailbox_visited or mailbox_open
 };
 
 struct RetainedState {
-    uint32_t magic;           // 0x4D414950 ("MAIP") for validity - version 5
-    uint8_t event_count;      // Number of buffered events
-    uint8_t max_events;       // Runtime configurable (1-20)
-    bool enabled;             // Device operational state (false = provisioning)
-    uint8_t door_open_stage;  // Escalating door-open timer stage (0=inactive, 1-3)
-    uint16_t poll_interval;   // Provisioning poll interval (seconds)
-    BufferedEvent events[20]; // Circular buffer, oldest at index 0
+    uint32_t magic;               // 0x4D414951 ("MAIQ") for validity - version 6
+    uint8_t event_count;          // Number of buffered events
+    uint8_t max_events;           // Runtime configurable (1-20)
+    bool enabled;                 // Device operational state (false = provisioning)
+    uint8_t door_open_stage;      // Escalating door-open timer stage (0=inactive, 1-3)
+    uint16_t poll_interval;       // Provisioning poll interval (seconds)
+    uint32_t mailWindowSecs;      // Open/close cycle timeout (seconds)
+    uint16_t activityThresholdMg; // ADXL367 activity threshold (mg)
+    uint8_t activityTime;         // ADXL367 activity time (samples)
+    uint16_t inactivityThresholdMg; // ADXL367 inactivity threshold (mg)
+    uint8_t inactivityTime;       // ADXL367 inactivity time (samples)
+    BufferedEvent events[20];     // Circular buffer, oldest at index 0
 };
 ```
 
@@ -423,8 +433,8 @@ struct RetainedState {
 
 **SMS Flood Prevention:**
 When sending multiple buffered events (catch-up after outage):
-- Older events sent with `owner_intervened: true` to suppress SMS notifications
-- Most recent event sent with actual `owner_intervened` value
+- Older events sent with `sms_suppress: true` to suppress SMS notifications
+- Most recent event sent with actual `sms_suppress` value
 - This prevents carers receiving a flood of SMS for stale events
 
 **Event Message Format:**
@@ -432,7 +442,7 @@ When sending multiple buffered events (catch-up after outage):
 {
   "event": "mailbox_visited",
   "timestamp": 12345,
-  "owner_intervened": false
+  "sms_suppress": false
 }
 ```
 
@@ -440,7 +450,7 @@ When sending multiple buffered events (catch-up after outage):
 |-------|------|-------------|
 | `event` | string | `"mailbox_visited"` or `"mailbox_open"` (see below) |
 | `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
-| `owner_intervened` | bool | `true` suppresses SMS notification |
+| `sms_suppress` | bool | `true` suppresses SMS notification |
 
 **Event Types:**
 - `mailbox_visited` — Door opened and closed (case 2). Covers both mail delivery and collection; the device cannot discriminate between the two.
@@ -448,7 +458,7 @@ When sending multiple buffered events (catch-up after outage):
 
 The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
 
-**Note on `owner_intervened`:** When catching up after connectivity outage, older buffered events are sent with `owner_intervened: true` to prevent SMS flood. Only the most recent event uses the actual value.
+**Note on `sms_suppress`:** When catching up after connectivity outage, older buffered events are sent with `sms_suppress: true` to prevent SMS flood. Only the most recent event uses its actual value.
 
 ### Power Budget
 

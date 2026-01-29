@@ -359,10 +359,10 @@ namespace alc
             totalTime, M_BOOT_OVERHEAD_MS, elapsed);
 
     uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-    bool ownerIntervened { false };  // Placeholder for future Hall sensor.
+    bool smsSuppressed { false };
 
     // Buffer the event first (ensures it's not lost if connection fails).
-    bufferMailEvent(timestamp, ownerIntervened);
+    bufferMailEvent(timestamp, smsSuppressed);
 
     // Initialise network hardware (modem, MQTT).
     if (!initNetworkHardware()) {
@@ -572,6 +572,16 @@ namespace alc
     if (hasBufferedEvents()) {
       LOG_INF("Found %d buffered events from previous session.", getBufferedEventCount());
     }
+
+    // Load persisted config from NVS.
+    m_config.mailWindowSecs = g_retained.mailWindowSecs;
+    m_config.activityThresholdMg = g_retained.activityThresholdMg;
+    m_config.activityTime = g_retained.activityTime;
+    m_config.inactivityThresholdMg = g_retained.inactivityThresholdMg;
+    m_config.inactivityTime = g_retained.inactivityTime;
+    LOG_INF("Loaded config: mail_window=%u, act=%u/%u, inact=%u/%u",
+            m_config.mailWindowSecs, m_config.activityThresholdMg, m_config.activityTime,
+            m_config.inactivityThresholdMg, m_config.inactivityTime);
   }
 
   // ========== Timer Configuration ==========
@@ -650,7 +660,7 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
+  bool App::sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
   {
     char topic[64];
     char message[256];
@@ -662,10 +672,10 @@ namespace alc
     int len { snprintf(message, sizeof(message),
                        "{\"event\":\"%s\","
                        "\"timestamp\":%u,"
-                       "\"owner_intervened\":%s}",
+                       "\"sms_suppress\":%s}",
                        eventName,
                        timestamp,
-                       ownerIntervened ? "true" : "false") };
+                       smsSuppressed ? "true" : "false") };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
 
@@ -698,20 +708,19 @@ namespace alc
         continue;
       }
 
-      // For older events (all except the last), set owner_intervened=true
+      // For older events (all except the last), set sms_suppress=true
       // to suppress SMS notifications and prevent flooding carers.
-      bool suppressSms = (i < count - 1);
-      bool ownerIntervened = suppressSms ? true : event.owner_intervened;
+      bool smsSuppressed = (i < count - 1) ? true : event.sms_suppress;
 
-      if (suppressSms) {
+      if (i < count - 1) {
         LOG_INF("Event %d/%d: timestamp=%u (catch-up, SMS suppressed)",
                 i + 1, count, event.timestamp);
       } else {
-        LOG_INF("Event %d/%d: timestamp=%u, owner_intervened=%d",
-                i + 1, count, event.timestamp, event.owner_intervened);
+        LOG_INF("Event %d/%d: timestamp=%u, sms_suppress=%d",
+                i + 1, count, event.timestamp, event.sms_suppress);
       }
 
-      if (!sendMailboxEvent(event.timestamp, ownerIntervened, event.event_type)) {
+      if (!sendMailboxEvent(event.timestamp, smsSuppressed, event.event_type)) {
         LOG_ERR("Failed to send buffered event %d", i);
         allSent = false;
         // Continue trying to send remaining events.
@@ -969,6 +978,12 @@ namespace alc
       case MqttCommand::RESET_CONFIG:
         LOG_INF("Resetting configuration to defaults...");
         m_config.setDefaults();
+        g_retained.mailWindowSecs = m_config.mailWindowSecs;
+        g_retained.activityThresholdMg = m_config.activityThresholdMg;
+        g_retained.activityTime = m_config.activityTime;
+        g_retained.inactivityThresholdMg = m_config.inactivityThresholdMg;
+        g_retained.inactivityTime = m_config.inactivityTime;
+        saveRetainedState();
         configChanged = true;
         LOG_INF("Configuration reset: mail_window=%u, act_thresh=%u, act_time=%u, inact_thresh=%u, inact_time=%u",
                 m_config.mailWindowSecs, m_config.activityThresholdMg, m_config.activityTime,
@@ -979,6 +994,8 @@ namespace alc
         value = extractIntValue(message, "mail_window");
         if (value > 0 && value <= 86400) {  // Max 24 hours.
           m_config.mailWindowSecs = static_cast<uint32_t>(value);
+          g_retained.mailWindowSecs = m_config.mailWindowSecs;
+          saveRetainedState();
           LOG_INF("Mail window set to %d seconds.", value);
         } else {
           LOG_WRN("Invalid mail_window value: %d (must be 1-86400).", value);
@@ -989,6 +1006,8 @@ namespace alc
         value = extractIntValue(message, "activity_threshold");
         if (value > 0 && value <= 8000) {  // Max 8g in mg.
           m_config.activityThresholdMg = static_cast<uint16_t>(value);
+          g_retained.activityThresholdMg = m_config.activityThresholdMg;
+          saveRetainedState();
           configChanged = true;
           LOG_INF("Activity threshold set to %d mg.", value);
         } else {
@@ -1000,6 +1019,8 @@ namespace alc
         value = extractIntValue(message, "activity_time");
         if (value > 0 && value <= 255) {
           m_config.activityTime = static_cast<uint8_t>(value);
+          g_retained.activityTime = m_config.activityTime;
+          saveRetainedState();
           configChanged = true;
           LOG_INF("Activity time set to %d samples.", value);
         } else {
@@ -1011,6 +1032,8 @@ namespace alc
         value = extractIntValue(message, "inactivity_threshold");
         if (value > 0 && value <= 8000) {  // Max 8g in mg.
           m_config.inactivityThresholdMg = static_cast<uint16_t>(value);
+          g_retained.inactivityThresholdMg = m_config.inactivityThresholdMg;
+          saveRetainedState();
           configChanged = true;
           LOG_INF("Inactivity threshold set to %d mg.", value);
         } else {
@@ -1022,6 +1045,8 @@ namespace alc
         value = extractIntValue(message, "inactivity_time");
         if (value > 0 && value <= 255) {
           m_config.inactivityTime = static_cast<uint8_t>(value);
+          g_retained.inactivityTime = m_config.inactivityTime;
+          saveRetainedState();
           configChanged = true;
           LOG_INF("Inactivity time set to %d samples.", value);
         } else {

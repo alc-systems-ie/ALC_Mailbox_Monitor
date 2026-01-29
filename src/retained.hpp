@@ -16,8 +16,8 @@
  * Buffered Event Handling:
  * - On CLOSE event: Add event to buffer with timestamp, save to NVS
  * - On successful LTE connection: Send all buffered events, then clear buffer
- * - Older buffered events sent with owner_intervened=true to suppress SMS flood
- * - Most recent event sent with actual owner_intervened value
+ * - Older buffered events sent with sms_suppress=true to suppress SMS flood
+ * - Most recent event sent with actual sms_suppress value
  *
  * Timestamps:
  * - Currently uses uptime in seconds (relative to boot)
@@ -59,7 +59,7 @@ enum class EventType : uint8_t {
  */
 struct BufferedEvent {
     uint32_t timestamp;       ///< Event time in seconds since boot (TODO: RTC epoch).
-    bool owner_intervened;    ///< True if owner was present (hall sensor, future).
+    bool sms_suppress;        ///< True to suppress SMS notification.
     EventType event_type;     ///< Type of event (visited or open).
 };
 
@@ -70,7 +70,7 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D414950;  // "MAIP" - version 5 with event types.
+    static constexpr uint32_t MAGIC = 0x4D414951;  // "MAIQ" - version 6: sms_suppress rename + persisted config.
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
@@ -78,6 +78,14 @@ struct RetainedState {
     bool enabled;                                  ///< Device operational state (false = provisioning mode).
     uint8_t door_open_stage;                       ///< Escalating door-open timer stage (0=inactive, 1-3=pending).
     uint16_t poll_interval;                        ///< Provisioning poll interval (seconds).
+
+    // Persisted MQTT-configurable parameters.
+    uint32_t mailWindowSecs;                       ///< Open/close cycle timeout (seconds).
+    uint16_t activityThresholdMg;                  ///< ADXL367 activity threshold (mg).
+    uint8_t activityTime;                          ///< ADXL367 activity time (samples).
+    uint16_t inactivityThresholdMg;                ///< ADXL367 inactivity threshold (mg).
+    uint8_t inactivityTime;                        ///< ADXL367 inactivity time (samples).
+
     BufferedEvent events[BUFFER_HARDWARE_MAX];     ///< Event buffer, oldest at index 0.
 };
 
@@ -132,10 +140,18 @@ uint8_t getMaxBufferedEvents();
  * the oldest event is dropped to make room.
  *
  * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
- * @param ownerIntervened True if owner was present during delivery.
+ * @param smsSuppressed True to suppress SMS notification.
  * @param type Event type (MailboxVisited or MailboxOpen).
  */
-void bufferMailEvent(uint32_t timestamp, bool ownerIntervened, EventType type = EventType::MailboxVisited);
+void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type = EventType::MailboxVisited);
+
+/**
+ * @brief Save the current g_retained state to flash.
+ *
+ * Exposes the internal saveState() for use by app code that writes
+ * directly to g_retained fields (e.g. persisted config parameters).
+ */
+void saveRetainedState();
 
 /**
  * @brief Get the number of buffered events waiting to be sent.

@@ -219,16 +219,16 @@ namespace alc
       /**
        * @brief Send a mailbox event (visited or open).
        * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
-       * @param ownerIntervened Whether owner signalled (placeholder for future).
+       * @param smsSuppressed Whether to suppress SMS notification.
        * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type);
+      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type);
 
       /**
        * @brief Send all buffered mail events.
        *
-       * Sends oldest events first with owner_intervened=true (to suppress SMS).
-       * The most recent event is sent with its actual owner_intervened value.
+       * Sends oldest events first with sms_suppress=true (to suppress SMS).
+       * The most recent event is sent with its actual sms_suppress value.
        *
        * @return true if all events were sent successfully.
        */

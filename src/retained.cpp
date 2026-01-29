@@ -120,6 +120,11 @@ void initRetainedState()
     g_retained.enabled = false;  // Start in provisioning mode.
     g_retained.door_open_stage = 0;
     g_retained.poll_interval = DEFAULT_POLL_INTERVAL;
+    g_retained.mailWindowSecs = 240;  // M_MAIL_WINDOW_SECS default.
+    g_retained.activityThresholdMg = 250;  // M_ACTIVITY_THRESHOLD_MG default.
+    g_retained.activityTime = 1;  // M_ACTIVITY_TIME default.
+    g_retained.inactivityThresholdMg = 250;  // M_INACTIVITY_THRESHOLD_MG default.
+    g_retained.inactivityTime = 10;  // M_INACTIVITY_TIME default.
     memset(g_retained.events, 0, sizeof(g_retained.events));
     s_valid = true;
 
@@ -159,7 +164,7 @@ uint8_t getMaxBufferedEvents()
     return g_retained.max_events;
 }
 
-void bufferMailEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
+void bufferMailEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
 {
     // If buffer is full, drop oldest event.
     if (g_retained.event_count >= g_retained.max_events) {
@@ -174,14 +179,19 @@ void bufferMailEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
     // Add new event at the end.
     BufferedEvent& newEvent = g_retained.events[g_retained.event_count];
     newEvent.timestamp = timestamp;
-    newEvent.owner_intervened = ownerIntervened;
+    newEvent.sms_suppress = smsSuppressed;
     newEvent.event_type = type;
     g_retained.event_count++;
 
     const char* typeStr = (type == EventType::MailboxOpen) ? "mailbox_open" : "mailbox_visited";
-    LOG_INF("Buffered event %d: type=%s, timestamp=%u, owner_intervened=%d",
-            g_retained.event_count, typeStr, timestamp, ownerIntervened);
+    LOG_INF("Buffered event %d: type=%s, timestamp=%u, sms_suppress=%d",
+            g_retained.event_count, typeStr, timestamp, smsSuppressed);
 
+    saveState();
+}
+
+void saveRetainedState()
+{
     saveState();
 }
 
