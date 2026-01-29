@@ -3,7 +3,7 @@
  * @brief ALC Mailbox Monitor - Main Entry Point.
  *
  * Ultra-low power mailbox monitoring using:
- * - nRF9151 with NB-IoT + PSM for cellular connectivity
+ * - nRF9151 with LTE-M for cellular connectivity
  * - ADXL367 in wake-up mode for motion detection
  * - System OFF for minimum power consumption
  *
@@ -24,7 +24,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 // GPIO pins for wake detection (must match app.hpp).
 static constexpr uint32_t PIN_ACCEL_INT { 11 };   // ADXL367 INT1.
-static constexpr uint32_t PIN_PMIC_INT { 2 };     // nPM1300 GPIO (future timer wake).
+static constexpr uint32_t PIN_PMIC_INT { 2 };     // nPM1300 SHPHLD GPIO (door-open timer).
 
 /**
  * @brief Identify wake source BEFORE any driver/class initialisation.
@@ -66,7 +66,7 @@ static alc::WakeSource identifyWakeSourceEarly()
     return alc::WakeSource::Accelerometer;
   }
 
-  // Check PMIC/Timer latch (P0.02) - future heartbeat wake.
+  // Check PMIC/Timer latch (P0.02) - door-open timer wake.
   if (nrf_gpio_pin_latch_get(PIN_PMIC_INT)) {
     LOG_INF("  PMIC/Timer latch SET (P0.%d)", PIN_PMIC_INT);
     nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
@@ -82,7 +82,7 @@ int main()
 {
   LOG_INF("===========================================");
   LOG_INF("  ALC MAILBOX MONITOR");
-  LOG_INF("  Firmware Version: 0.1.0");
+  LOG_INF("  Firmware Version: 0.4.0");
   LOG_INF("===========================================");
 
   // =========================================================================

@@ -78,49 +78,34 @@ The nPM1300 GP Timer drives an escalating door-open notification sequence when t
 
 ## MQTT Runtime Configuration
 
-### Configurable Parameters
+All commands are sent as JSON to `alc/{DEVICE_ID}/commands` (retained messages recommended).
 
-| Parameter | Type | Default | Min | Max | Unit | Description |
-|-----------|------|---------|-----|-----|------|-------------|
-| `mail_window` | uint32 | 240 | 1 | 86400 | seconds | Time window for open/close detection cycle |
-| `activity_threshold` | uint16 | 250 | 1 | 8000 | mg | Motion sensitivity for wake trigger |
-| `activity_time` | uint8 | 1 | 1 | 255 | samples | Consecutive samples above threshold to trigger |
-| `inactivity_threshold` | uint16 | 250 | 1 | 8000 | mg | Threshold to return to inactive state (referenced mode) |
-| `inactivity_time` | uint8 | 10 | 1 | 255 | samples | Consecutive samples below threshold for inactive |
-| `max_buffered_events` | uint8 | 10 | 1 | 20 | events | Maximum mail events to buffer when offline |
-| `poll_interval` | uint16 | 60 | 10 | 300 | seconds | Provisioning mode wake/poll interval |
+### Commands
 
-### Command Topic
+| Command | Example | Description |
+|---------|---------|-------------|
+| `enable` | `{"enable": true}` | Exit provisioning mode, start mail detection |
+| `disable` | `{"disable": true}` | Enter provisioning mode on next boot |
+| `reset_config` | `{"reset_config": true}` | Reset all parameters to defaults |
+| `status_request` | `{"status_request": true}` | Publish current config to status topic |
+| `reset_device` | `{"reset_device": true}` | Reboot device, returns to provisioning mode |
 
-```
-alc/{DEVICE_ID}/commands
-```
+### Adjustable Parameters
 
-### Command Formats (JSON)
+| Parameter | Command | Default | Range | Unit | Description |
+|-----------|---------|---------|-------|------|-------------|
+| `mail_window` | `{"mail_window": 300}` | 240 | 1–86400 | seconds | Open/close cycle timeout |
+| `activity_threshold` | `{"activity_threshold": 200}` | 250 | 1–8000 | mg | Motion sensitivity to wake |
+| `activity_time` | `{"activity_time": 2}` | 1 | 1–255 | samples | Samples above threshold to trigger |
+| `inactivity_threshold` | `{"inactivity_threshold": 1000}` | 250 | 1–8000 | mg | Threshold to detect rest (referenced) |
+| `inactivity_time` | `{"inactivity_time": 15}` | 10 | 1–255 | samples | Samples below threshold for inactive |
+| `max_buffered_events` | `{"max_buffered_events": 15}` | 10 | 1–20 | events | Offline event buffer size |
+| `poll_interval` | `{"poll_interval": 30}` | 60 | 10–300 | seconds | Provisioning mode poll frequency |
 
-```json
-// Provisioning mode commands
-{"enable": true}              // Enable device, exit provisioning mode
-{"disable": true}             // Disable device, enter provisioning mode
-{"poll_interval": 30}         // Set provisioning poll interval (10-300s)
+### Persistence Notes
 
-// Set individual parameters
-{"mail_window": 300}
-{"activity_threshold": 200}
-{"activity_time": 2}
-{"inactivity_threshold": 1000}
-{"inactivity_time": 15}
-{"max_buffered_events": 15}
-
-// Reset all to factory defaults
-{"reset_config": true}
-
-// Request current config (publishes to status topic)
-{"status_request": true}
-
-// Device reset (waits for timer expiry, then reboots, returns to provisioning mode)
-{"reset_device": true}
-```
+- ADXL367 parameters (`activity_threshold`, `activity_time`, `inactivity_threshold`, `inactivity_time`, `mail_window`) take effect immediately but do **not** persist across System OFF.
+- `enabled`, `poll_interval`, `max_buffered_events`, and `door_open_stage` are stored in NVS flash and persist across System OFF.
 
 ### Device Reset Behaviour
 
@@ -397,7 +382,6 @@ When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalati
 - Samples arrive in X, Y, Z order (3 samples per XYZ set)
 
 **Known Issues / Quirks:**
-- `mailbox_visited` MQTT publish currently suppressed for testing
 - Main stack increased to 8K for analysis buffers — review if this can be reduced
 
 ### Event Buffering (NVS Flash)

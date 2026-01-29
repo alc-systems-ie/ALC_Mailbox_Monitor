@@ -4,28 +4,23 @@
  * @file app.hpp
  * @brief ALC Mailbox Monitor Application.
  *
- * Single-wake state machine for detecting mail delivery:
+ * Single-wake state machine for detecting mailbox events:
  *
  * Logic:
  * 1. Device sleeps in System OFF (nA power consumption).
  * 2. Motion detected → ADXL367 AWAKE signal wakes device.
- * 3. MCU polls AWAKE until it clears (door closed / device at rest).
- * 4. Send MQTT "mail_delivered" notification.
+ * 3. Classify event by settled position (home vs not home).
+ * 4. Home → send "mailbox_visited". Not home → start escalating door-open timer.
  * 5. Return to System OFF.
  *
  * ADXL367 uses referenced activity/inactivity in loop mode with autosleep.
  * AWAKE stays HIGH while device is displaced from its rest position and
  * only clears when returned to the home orientation.
  *
- * Active wake sources:
+ * Wake sources:
  * - ADXL367 INT1 (P0.11): Motion detection
- *
- * Future wake sources (stubs):
- * - nPM1300 Timer GPIO (P0.02): Nightly heartbeat at 3am
- * - Hall Sensor (TBD): Owner interaction
- *
- * MQTT-configurable parameters:
- * - Mail detection window (default 240 seconds / 4 mins)
+ * - nPM1300 Timer GPIO (P0.02): Escalating door-open timer
+ * - Hall Sensor (TBD): Owner interaction (future)
  */
 
 #include <zephyr/kernel.h>
@@ -68,7 +63,7 @@ namespace alc
   constexpr size_t M_MQTT_TOPIC_LENGTH { 128 };
   constexpr size_t M_MQTT_CONNECTION_RETRIES { 100 };
 
-  // Modem timeout (NB-IoT can be slow).
+  // Modem timeout (LTE-M connection can be slow).
   constexpr int M_MODEM_TIMEOUT_SEC { 90 };
 
   // LED flash period.
@@ -80,7 +75,7 @@ namespace alc
     Unknown,
     PowerOn,          // Fresh boot / reset.
     Accelerometer,    // ADXL367 motion detected (P0.11).
-    Timer,            // nPM1300 timer (P0.02) - future heartbeat.
+    Timer,            // nPM1300 timer (P0.02) - door-open escalation.
     HallSensor        // Owner interaction - future.
   };
 
@@ -162,7 +157,7 @@ namespace alc
       void handleMotionWake();
 
       /**
-       * @brief Handle timer wake - nightly heartbeat (future).
+       * @brief Handle timer wake - escalating door-open notifications.
        */
       void handleTimerWake();
 
@@ -264,6 +259,7 @@ namespace alc
       MqttCommand parseCommand(const char* message, size_t length);
       void executeCommand(MqttCommand cmd, const char* message, size_t length);
       int extractIntValue(const char* message, const char* key);
+      void clearRetainedCommand();
 
       // ========== Sensor Configuration ==========
 
@@ -275,7 +271,7 @@ namespace alc
       // ========== Timer Configuration ==========
 
       /**
-       * @brief Initialise nPM1300 GP Timer for mail window timing.
+       * @brief Initialise nPM1300 GP Timer (GP mode, slow prescaler).
        */
       int configureMailWindowTimer();
 
@@ -326,7 +322,7 @@ namespace alc
 
       // GPIO pins for wake sources.
       static constexpr uint32_t PIN_ACCEL_INT { 11 };   // ADXL367 INT1.
-      static constexpr uint32_t PIN_PMIC_INT { 2 };     // nPM1300 GPIO (future timer wake).
+      static constexpr uint32_t PIN_PMIC_INT { 2 };     // nPM1300 SHPHLD GPIO (door-open timer).
 
       // ========== Hardware Objects ==========
 
@@ -344,9 +340,6 @@ namespace alc
 
       // ADXL367 AWAKE state captured before init (motion still ongoing at boot).
       bool m_awakeAtBoot { false };
-
-      // Boot counter for debugging.
-      uint32_t m_boot_count;
 
       // ========== Singleton ==========
 

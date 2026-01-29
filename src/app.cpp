@@ -39,7 +39,6 @@ namespace alc
       , m_motion(i2c_dev, Adxl367::I2cAddress::AddrLow)
       , m_mqtt(*this)
       , m_pmic { DEVICE_DT_GET(DT_NODELABEL(pmic_main)), DEVICE_DT_GET(DT_NODELABEL(npm1300_charger)) }
-      , m_boot_count(0)
   {
     s_instance = this;
     m_config.setDefaults();
@@ -51,8 +50,8 @@ namespace alc
   {
     m_awakeAtBoot = awakeAtBoot;
     LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║     ALC MAILBOX MONITOR v0.3.0         ║");
-    LOG_INF("║     (Simplified Timer Logic)           ║");
+    LOG_INF("║     ALC MAILBOX MONITOR v0.4.0         ║");
+    LOG_INF("║     (Escalating Door-Open Timer)       ║");
     LOG_INF("╚════════════════════════════════════════╝");
 
     // =========================================================================
@@ -209,15 +208,14 @@ namespace alc
     // when the MCU booted (~250ms after wake).
     //
     // Case 1 (Bump):
-    //   AWAKE was LOW at boot → motion ended before MCU started → ignore
+    //   AWAKE was LOW at boot → motion ended before MCU started → ignore.
     //
-    // Case 2 (Mail delivery):
-    //   AWAKE was HIGH at boot → real movement → poll until rest → send event
+    // Case 2 (Mailbox visited):
+    //   AWAKE was HIGH at boot → device settles at home → send event.
     //
     // Case 3 (Door left open):
-    //   AWAKE was HIGH at boot → poll times out after 30s → not home →
-    //   start incremental timer.
-    //   TODO: Implement with PMIC timer wake (P0.02).
+    //   AWAKE was HIGH at boot → device settles NOT at home →
+    //   start escalating door-open timer via nPM1300 (P0.02 wake).
     // =========================================================================
 
     constexpr uint32_t M_AWAKE_TIMEOUT_MS { 30000 };  // 30 seconds.
@@ -580,10 +578,9 @@ namespace alc
 
   int App::configureMailWindowTimer()
   {
-    LOG_INF("Configuring nPM1300 GP Timer for mail window...");
+    LOG_INF("Configuring nPM1300 GP Timer...");
 
     // Configure timer: GP mode, slow prescaler (16ms/tick).
-    // This only needs to be done once - the configuration persists.
     int result = m_pmic.TimerConfigure(
       Npm1300::TimerMode::GeneralPurpose,
       Npm1300::TimerPrescaler::Slow
@@ -595,8 +592,6 @@ namespace alc
     }
 
     LOG_INF("Timer configured: GP mode, Slow prescaler (16ms/tick).");
-    LOG_INF("Mail window duration: %u seconds.", m_config.mailWindowSecs);
-
     return 0;
   }
 
@@ -640,9 +635,8 @@ namespace alc
 
     int len { snprintf(message, sizeof(message),
                        "{\"event\":\"heartbeat\","
-                       "\"boot_count\":%u,"
                        "\"mail_window_secs\":%u}",
-                       m_boot_count, m_config.mailWindowSecs) };
+                       m_config.mailWindowSecs) };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_HEARTBEAT);
 
@@ -677,12 +671,10 @@ namespace alc
 
     LOG_INF("Sending event: %s", message);
 
-    // TODO: Re-enable when FIFO testing complete.
-    // if (!m_mqtt.Publish(topic, message, len, false)) {
-    //   LOG_ERR("Failed to publish event!");
-    //   return false;
-    // }
-    LOG_INF("(MQTT publish suppressed for FIFO testing)");
+    if (!m_mqtt.Publish(topic, message, len, false)) {
+      LOG_ERR("Failed to publish event!");
+      return false;
+    }
 
     return true;
   }
@@ -1059,14 +1051,7 @@ namespace alc
 
       case MqttCommand::DEVICE_RESET:
         LOG_INF("Device reset requested.");
-        // Clear the retained command by publishing empty message.
-        {
-          char cmdTopic[M_MQTT_TOPIC_LENGTH];
-          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
-          LOG_INF("Clearing retained reset command...");
-          m_mqtt.Publish(cmdTopic, "", 0, true);  // Empty retained message clears it.
-          k_msleep(500);  // Allow time for publish to complete.
-        }
+        clearRetainedCommand();
         // Disable device so it returns to provisioning mode after reset.
         setEnabled(false);
         executeDeviceReset();
@@ -1075,27 +1060,13 @@ namespace alc
 
       case MqttCommand::ENABLE:
         LOG_INF("Enable command received.");
-        // Clear the retained command.
-        {
-          char cmdTopic[M_MQTT_TOPIC_LENGTH];
-          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
-          LOG_INF("Clearing retained enable command...");
-          m_mqtt.Publish(cmdTopic, "", 0, true);
-          k_msleep(500);
-        }
+        clearRetainedCommand();
         setEnabled(true);
         break;
 
       case MqttCommand::DISABLE:
         LOG_INF("Disable command received.");
-        // Clear the retained command.
-        {
-          char cmdTopic[M_MQTT_TOPIC_LENGTH];
-          buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
-          LOG_INF("Clearing retained disable command...");
-          m_mqtt.Publish(cmdTopic, "", 0, true);
-          k_msleep(500);
-        }
+        clearRetainedCommand();
         setEnabled(false);
         break;
 
@@ -1125,6 +1096,15 @@ namespace alc
         LOG_INF("ADXL367 reconfigured successfully.");
       }
     }
+  }
+
+  void App::clearRetainedCommand()
+  {
+    char cmdTopic[M_MQTT_TOPIC_LENGTH];
+    buildTopic(cmdTopic, sizeof(cmdTopic), M_SUFFIX_COMMANDS);
+    LOG_INF("Clearing retained command...");
+    m_mqtt.Publish(cmdTopic, "", 0, true);
+    k_msleep(500);
   }
 
   int App::extractIntValue(const char* message, const char* key)
