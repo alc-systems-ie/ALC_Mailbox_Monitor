@@ -305,6 +305,11 @@ namespace alc
         return;
       }
 
+      // Stop any existing timer before starting the next one.
+      // Handles edge case: gust of wind triggers accelerometer wake
+      // while a previous stage timer is still running.
+      m_pmic.TimerStop();
+
       // Start the next escalating timer (stage 0→1, 1→2, 2→3).
       uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
 
