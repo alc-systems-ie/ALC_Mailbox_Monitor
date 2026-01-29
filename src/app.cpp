@@ -530,9 +530,10 @@ namespace alc
 
       // Connect and send status/battery, check for commands.
       if (connectToCloud()) {
-        sendConfigStatus();  // Includes enabled:false, provisioning:true.
+        sendConfigStatus();  // Pre-command status.
         sendBatteryStatus();
         collectMqttCommands();  // Will process enable command if present.
+        sendConfigStatus();  // Post-command confirmation for server UI.
         disconnectFromCloud();
       } else {
         LOG_ERR("Failed to connect in provisioning mode.");
