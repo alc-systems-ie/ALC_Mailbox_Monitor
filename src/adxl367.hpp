@@ -188,6 +188,17 @@ namespace alc
       int EnableWakeupMode(WakeupRate rate = WakeupRate::Rate6Sps);
 
       /**
+       * @brief Set wake-up sampling rate without enabling wake-up mode.
+       *
+       * Sets TIMER_CTL[7:6] wake-up rate. Used with autosleep mode where
+       * the device autonomously enters wake-up mode at this rate.
+       *
+       * @param rate Wake-up sampling rate.
+       * @return 0 on success, negative error code on failure.
+       */
+      int SetWakeupRate(WakeupRate rate);
+
+      /**
        * @brief Disable wake-up mode (switch to full ODR measurement).
        * @return 0 on success, negative error code on failure.
        */

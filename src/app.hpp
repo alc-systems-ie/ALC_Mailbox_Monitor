@@ -134,8 +134,9 @@ namespace alc
        * This function does not return.
        *
        * @param wake The wake source (detected in main before App construction).
+       * @param awakeAtBoot True if ADXL367 INT1 pin was HIGH at boot (before init).
        */
-      void Start(WakeSource wake);
+      void Start(WakeSource wake, bool awakeAtBoot = false);
 
       // MQTT callbacks.
       void OnMqttConnected();
@@ -332,6 +333,9 @@ namespace alc
 
       // Track if network hardware has been initialised.
       bool m_networkInitialised { false };
+
+      // ADXL367 AWAKE state captured before init (motion still ongoing at boot).
+      bool m_awakeAtBoot { false };
 
       // Boot counter for debugging.
       uint32_t m_boot_count;

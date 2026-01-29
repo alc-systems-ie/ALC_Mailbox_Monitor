@@ -32,6 +32,9 @@ static constexpr uint32_t PIN_PMIC_INT { 2 };     // nPM1300 GPIO (future timer 
  * This MUST be called before the App object is constructed, as
  * constructor initialisation of hardware objects can affect GPIO states.
  */
+// Captured before any driver init — true if AWAKE pin was still HIGH at boot.
+static bool s_awakeAtBoot { false };
+
 static alc::WakeSource identifyWakeSourceEarly()
 {
   uint32_t resetReason { nrf_power_resetreas_get(NRF_POWER_NS) };
@@ -52,6 +55,13 @@ static alc::WakeSource identifyWakeSourceEarly()
   // Check accelerometer latch (P0.11) - MUST check before any I2C activity.
   if (nrf_gpio_pin_latch_get(PIN_ACCEL_INT)) {
     LOG_INF("  Accelerometer latch SET (P0.%d)", PIN_ACCEL_INT);
+    // Read raw pin level BEFORE any driver init resets the ADXL367.
+    // If pin is still HIGH, AWAKE is active (motion ongoing).
+    // If LOW, motion was brief but real (latch proves rising edge occurred).
+    uint32_t pinLevel { nrf_gpio_pin_read(PIN_ACCEL_INT) };
+    s_awakeAtBoot = (pinLevel != 0);
+    LOG_INF("  INT1 pin level: %u (AWAKE %s)", pinLevel,
+            pinLevel ? "ACTIVE" : "cleared");
     nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
     return alc::WakeSource::Accelerometer;
   }
@@ -85,7 +95,7 @@ int main()
   // Create application instance and start with detected wake source.
   // Start() does not return - it enters System OFF at the end.
   alc::App app;
-  app.Start(wake);
+  app.Start(wake, s_awakeAtBoot);
 
   // Should never reach here.
   return 0;

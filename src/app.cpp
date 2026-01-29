@@ -47,8 +47,9 @@ namespace alc
 
   // ========== Start (Main Entry Point) ==========
 
-  void App::Start(WakeSource wake)
+  void App::Start(WakeSource wake, bool awakeAtBoot)
   {
+    m_awakeAtBoot = awakeAtBoot;
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║     ALC MAILBOX MONITOR v0.3.0         ║");
     LOG_INF("║     (Simplified Timer Logic)           ║");
@@ -201,17 +202,49 @@ namespace alc
     }
 
     // =========================================================================
-    // Single-wake mail detection:
-    // 1. Poll AWAKE until device returns to rest (door closed).
-    // 2. Read settled position to confirm home orientation.
-    // 3. Send mail_delivered event.
+    // Motion wake event classification (pre-init AWAKE capture):
+    //
+    // The AWAKE pin state is captured in main.cpp BEFORE any driver init
+    // (which resets the ADXL367). This tells us if motion was still ongoing
+    // when the MCU booted (~250ms after wake).
+    //
+    // Case 1 (Bump):
+    //   AWAKE was LOW at boot → motion ended before MCU started → ignore
+    //
+    // Case 2 (Mail delivery):
+    //   AWAKE was HIGH at boot → real movement → poll until rest → send event
+    //
+    // Case 3 (Door left open):
+    //   AWAKE was HIGH at boot → poll times out after 30s → not home →
+    //   start incremental timer.
+    //   TODO: Implement with PMIC timer wake (P0.02).
     // =========================================================================
 
-    // Safety timeout for AWAKE polling — if door is left open indefinitely,
-    // give up and sleep. This also covers sensor malfunction.
-    constexpr uint32_t M_AWAKE_TIMEOUT_MS { 600000 };  // 10 minutes.
+    constexpr uint32_t M_AWAKE_TIMEOUT_MS { 30000 };  // 30 seconds.
     constexpr uint32_t M_AWAKE_POLL_MS { 200 };
 
+    // Home position (flat on desk — adjust for mounted orientation).
+    constexpr int16_t M_HOME_X { 0 };
+    constexpr int16_t M_HOME_Y { 0 };
+    constexpr int16_t M_HOME_Z { -1000 };  // Gravity on Z-axis when flat.
+
+    LOG_INF("AWAKE at boot: %s", m_awakeAtBoot ? "YES (motion ongoing)" : "NO (bump)");
+
+    // =========================================================================
+    // Case 1: AWAKE was already LOW at boot — brief bump.
+    // =========================================================================
+    if (!m_awakeAtBoot) {
+      LOG_INF("Classification: BUMP (AWAKE cleared before boot)");
+      LOG_INF("Ignoring spurious wake - returning to sleep.");
+      return;
+    }
+
+    // =========================================================================
+    // AWAKE was HIGH at boot — real movement. Poll until it clears.
+    // Note: configureMotionSensor() has already run (resets ADXL367), so we
+    // poll the freshly-configured sensor. AWAKE will reassert if the device
+    // is still displaced from its new reference point.
+    // =========================================================================
     LOG_INF("Polling AWAKE until device returns to rest...");
 
     int64_t startTime { k_uptime_get() };
@@ -229,13 +262,7 @@ namespace alc
       }
     }
 
-    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
-      LOG_WRN("AWAKE timeout after %u ms - door may be left open.", elapsed);
-      LOG_INF("Returning to sleep without sending event.");
-      return;
-    }
-
-    LOG_INF("AWAKE cleared after %u ms - device at rest.", elapsed);
+    LOG_INF("AWAKE polling complete: %u ms", elapsed);
 
     // Small delay for readings to settle.
     k_msleep(100);
@@ -245,9 +272,52 @@ namespace alc
     m_motion.ReadAxes(x, y, z);
     LOG_INF("Settled position: X=%d Y=%d Z=%d mg", x, y, z);
 
+    // Check if device is at home position.
+    int16_t threshold { static_cast<int16_t>(m_config.activityThresholdMg) };
+    bool atHome { (abs(x - M_HOME_X) < threshold) &&
+                  (abs(y - M_HOME_Y) < threshold) &&
+                  (abs(z - M_HOME_Z) < threshold) };
+
+    LOG_INF("Position: %s", atHome ? "HOME" : "NOT HOME");
+
     // =========================================================================
-    // Send mail delivered event.
+    // Case 3: AWAKE timeout — door left open.
     // =========================================================================
+    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
+      if (!atHome) {
+        LOG_INF("╔════════════════════════════════════════╗");
+        LOG_INF("║       DOOR LEFT OPEN                   ║");
+        LOG_INF("╚════════════════════════════════════════╝");
+        // TODO: Send door_open event.
+        // TODO: Start incremental timer (4min → 1hr → 2hr) via nPM1300.
+        // TODO: Recalibrate ADXL367 to allow System OFF.
+        // TODO: Stop incremental timer at every close event.
+        LOG_INF("Door-open handling not yet implemented - sleeping.");
+        return;
+      }
+
+      // AWAKE stuck but device is at home — recalibrate to clear.
+      LOG_INF("AWAKE stuck at home - recalibrating ADXL367...");
+      int recalResult { configureMotionSensor() };
+      if (recalResult < 0) {
+        LOG_ERR("Recalibration failed: %d", recalResult);
+      } else {
+        LOG_INF("Recalibration complete.");
+      }
+    }
+
+    if (!atHome) {
+      LOG_WRN("Device at rest but NOT at home position - ignoring.");
+      return;
+    }
+
+    // =========================================================================
+    // Case 2: Mail delivery — AWAKE was HIGH at boot, device now at home.
+    // =========================================================================
+
+    // TODO: Stop incremental timer if running (case 3 recovery).
+
+    // ===== MAIL DELIVERY =====
     LOG_INF("╔════════════════════════════════════════╗");
     LOG_INF("║       MAIL DELIVERED!                  ║");
     LOG_INF("╚════════════════════════════════════════╝");
@@ -1129,6 +1199,10 @@ namespace alc
     if (result < 0) { return result; }
 
     result = m_motion.SetOdr(Adxl367::ODR::Hz50);
+    if (result < 0) { return result; }
+
+    // Wake-up rate (TIMER_CTL 0x39) — 12.5 SPS for fastest FIFO capture.
+    result = m_motion.SetWakeupRate(Adxl367::WakeupRate::Rate12Sps);
     if (result < 0) { return result; }
 
     // Step 2: Enter measurement mode with autosleep (POWER_CTL = 0x06).

@@ -297,6 +297,21 @@ namespace alc {
     return 0;
   }
 
+  int Adxl367::SetWakeupRate(WakeupRate rate)
+  {
+    int result { updateRegister(M_REG_TIMER_CTL,
+                                static_cast<uint8_t>(rate) << M_WAKEUP_RATE_SHIFT,
+                                M_WAKEUP_RATE_MASK) };
+    if (result < 0) {
+      LOG_ERR("Failed to set wake-up rate: %d!", result);
+      return result;
+    }
+
+    const char* rateStr[] { "12", "6", "3", "1.5" };
+    LOG_INF("Wake-up rate set to %s SPS.", rateStr[static_cast<uint8_t>(rate)]);
+    return 0;
+  }
+
   int Adxl367::DisableWakeupMode()
   {
     int result { updateRegister(M_REG_POWER_CTL, 0, M_WAKEUP_MASK) };
