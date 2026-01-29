@@ -420,7 +420,7 @@ namespace alc
 
     // Buffer a mailbox_open event.
     uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
-    bufferMailEvent(timestamp, false, EventType::MailboxOpen);
+    bufferMailEvent(timestamp, false, EventType::MailboxOpen, stage);
 
     // Initialise network hardware.
     if (!initNetworkHardware()) {
@@ -661,7 +661,8 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type)
+  bool App::sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type,
+                             uint8_t doorOpenStage)
   {
     char topic[64];
     char message[256];
@@ -670,13 +671,26 @@ namespace alc
 
     // TODO: When RTC is fitted, timestamp will be Unix epoch.
     // For now it's seconds since boot.
-    int len { snprintf(message, sizeof(message),
-                       "{\"event\":\"%s\","
-                       "\"timestamp\":%u,"
-                       "\"sms_suppress\":%s}",
-                       eventName,
-                       timestamp,
-                       smsSuppressed ? "true" : "false") };
+    int len;
+    if (type == EventType::MailboxOpen) {
+      len = snprintf(message, sizeof(message),
+                     "{\"event\":\"%s\","
+                     "\"stage\":%u,"
+                     "\"timestamp\":%u,"
+                     "\"sms_suppress\":%s}",
+                     eventName,
+                     doorOpenStage,
+                     timestamp,
+                     smsSuppressed ? "true" : "false");
+    } else {
+      len = snprintf(message, sizeof(message),
+                     "{\"event\":\"%s\","
+                     "\"timestamp\":%u,"
+                     "\"sms_suppress\":%s}",
+                     eventName,
+                     timestamp,
+                     smsSuppressed ? "true" : "false");
+    }
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
 
@@ -721,7 +735,7 @@ namespace alc
                 i + 1, count, event.timestamp, event.sms_suppress);
       }
 
-      if (!sendMailboxEvent(event.timestamp, smsSuppressed, event.event_type)) {
+      if (!sendMailboxEvent(event.timestamp, smsSuppressed, event.event_type, event.door_open_stage)) {
         LOG_ERR("Failed to send buffered event %d", i);
         allSent = false;
         // Continue trying to send remaining events.

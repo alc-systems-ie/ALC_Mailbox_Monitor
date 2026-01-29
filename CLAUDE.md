@@ -437,7 +437,7 @@ When sending multiple buffered events (catch-up after outage):
 - Most recent event sent with actual `sms_suppress` value
 - This prevents carers receiving a flood of SMS for stale events
 
-**Event Message Format:**
+**Event Message Format (`mailbox_visited`):**
 ```json
 {
   "event": "mailbox_visited",
@@ -446,9 +446,20 @@ When sending multiple buffered events (catch-up after outage):
 }
 ```
 
+**Event Message Format (`mailbox_open`):**
+```json
+{
+  "event": "mailbox_open",
+  "stage": 1,
+  "timestamp": 12345,
+  "sms_suppress": false
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `event` | string | `"mailbox_visited"` or `"mailbox_open"` (see below) |
+| `stage` | uint8 | Escalation stage (1-3), only present for `mailbox_open` events |
 | `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
 | `sms_suppress` | bool | `true` suppresses SMS notification |
 

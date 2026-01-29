@@ -222,7 +222,8 @@ namespace alc
        * @param smsSuppressed Whether to suppress SMS notification.
        * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type);
+      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type,
+                           uint8_t doorOpenStage = 0);
 
       /**
        * @brief Send all buffered mail events.
