@@ -90,9 +90,13 @@ namespace alc
        */
       struct Status {
         bool dataReady;          ///< New data available.
+        bool fifoReady;          ///< FIFO has at least one sample.
+        bool fifoWatermark;      ///< FIFO contains >= watermark samples.
+        bool fifoOverrun;        ///< FIFO has overrun.
         bool activityDetected;   ///< Activity detected.
         bool inactivityDetected; ///< Inactivity detected.
         bool awake;              ///< Device is in awake state.
+        bool errUserRegs;        ///< SEU error in user registers.
       };
 
       /**
@@ -330,8 +334,8 @@ namespace alc
       int verifyDeviceId();
 
       // Constants.
-      static constexpr uint8_t STARTUP_DELAY_MS { 100 };
-      static constexpr uint8_t RESET_DELAY_MS { 8 };
+      static constexpr uint8_t M_STARTUP_DELAY_MS { 100 };
+      static constexpr uint8_t M_RESET_DELAY_MS { 8 };
   };
 
 } // namespace alc

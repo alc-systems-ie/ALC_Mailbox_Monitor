@@ -6,93 +6,128 @@ LOG_MODULE_REGISTER(adxl367, LOG_LEVEL_INF);
 
 namespace alc {
 
-  // ========== Register Definitions ==========
-  // Embedded here to keep the driver self-contained.
+  // ========== Register Addresses ==========
 
-  namespace reg {
-    // Device ID registers.
-    constexpr uint8_t DEVID_AD        { 0x00 };
-    constexpr uint8_t DEVID_MST       { 0x01 };
-    constexpr uint8_t PART_ID         { 0x02 };
-    
-    // Expected values.
-    constexpr uint8_t DEVID_AD_VALUE  { 0xAD };
-    constexpr uint8_t DEVID_MST_VALUE { 0x1D };
-    constexpr uint8_t PART_ID_VALUE   { 0xF7 };
-    
-    // Status register.
-    constexpr uint8_t STATUS          { 0x0B };
-    constexpr uint8_t STATUS_DATA_READY_MASK  { 0x01 };
-    constexpr uint8_t STATUS_ACT_MASK         { 0x10 };
-    constexpr uint8_t STATUS_INACT_MASK       { 0x20 };
-    constexpr uint8_t STATUS_AWAKE_MASK       { 0x40 };
-    
-    // Activity/Inactivity thresholds.
-    constexpr uint8_t THRESH_ACT_H    { 0x20 };
-    constexpr uint8_t THRESH_ACT_L    { 0x21 };
-    constexpr uint8_t TIME_ACT        { 0x22 };
-    constexpr uint8_t THRESH_INACT_H  { 0x23 };
-    constexpr uint8_t THRESH_INACT_L  { 0x24 };
-    constexpr uint8_t TIME_INACT_H    { 0x25 };
-    constexpr uint8_t TIME_INACT_L    { 0x26 };
-    
-    // Activity/Inactivity control.
-    constexpr uint8_t ACT_INACT_CTL   { 0x27 };
-    constexpr uint8_t ACT_EN_SHIFT    { 0 };
-    constexpr uint8_t INACT_EN_SHIFT  { 2 };
-    constexpr uint8_t LINKLOOP_SHIFT  { 4 };
-    
-    // FIFO.
-    constexpr uint8_t FIFO_ENTRIES_H  { 0x0C };
-    constexpr uint8_t FIFO_ENTRIES_L  { 0x0D };
-    constexpr uint8_t I2C_FIFO_DATA   { 0x18 };
-    constexpr uint8_t FIFO_CONTROL    { 0x28 };
-    constexpr uint8_t FIFO_SAMPLES    { 0x29 };
-    constexpr uint8_t FIFO_MODE_MASK  { 0x03 };
-    constexpr uint8_t FIFO_CHANNEL_SHIFT { 3 };
-    // CHANNEL_SELECT=0x0 stores X, Y, Z (default).
+  // Device ID registers.
+  constexpr uint8_t M_REG_DEVID_AD        { 0x00 };
+  constexpr uint8_t M_REG_DEVID_MST       { 0x01 };
+  constexpr uint8_t M_REG_PART_ID         { 0x02 };
 
-    // Filter control.
-    constexpr uint8_t FILTER_CTL      { 0x2C };
-    constexpr uint8_t RANGE_SHIFT     { 6 };
-    constexpr uint8_t RANGE_MASK      { 0xC0 };
-    constexpr uint8_t ODR_MASK        { 0x07 };
-    
-    // Power control.
-    constexpr uint8_t POWER_CTL       { 0x2D };
-    constexpr uint8_t MEASURE_SHIFT   { 0 };
-    constexpr uint8_t MEASURE_MASK    { 0x03 };
-    constexpr uint8_t MEASURE_STANDBY     { 0 };
-    constexpr uint8_t MEASURE_MEASUREMENT { 2 };
-    constexpr uint8_t WAKEUP_MASK     { 0x08 };
-    constexpr uint8_t NOISE_SHIFT     { 4 };
-    constexpr uint8_t NOISE_MASK      { 0x30 };
-    constexpr uint8_t NOISE_NORMAL    { 0 };
-    
-    // Timer control (wake-up rate).
-    constexpr uint8_t TIMER_CTL       { 0x39 };
-    constexpr uint8_t WAKEUP_RATE_SHIFT { 0 };
-    constexpr uint8_t WAKEUP_RATE_MASK  { 0x03 };
-    
-    // Interrupt mapping.
-    constexpr uint8_t INTMAP1_LOWER   { 0x2A };
-    constexpr uint8_t INTMAP2_LOWER   { 0x2B };
-    constexpr uint8_t INT_AWAKE_MASK  { 0x40 };
-    constexpr uint8_t INT_LOW_MASK    { 0x80 };
-    
-    // Soft reset.
-    constexpr uint8_t SOFT_RESET      { 0x1F };
-    constexpr uint8_t SOFT_RESET_CODE { 0x52 };
-    
-    // Scale factors (mg per LSB).
-    constexpr float SCALE_2G_MG { 0.25f };
-    constexpr float SCALE_4G_MG { 0.5f };
-    constexpr float SCALE_8G_MG { 1.0f };
-    
-    // Threshold register masks.
-    constexpr uint8_t THRESH_ACT_H_MASK { 0x7F };
-    constexpr uint8_t THRESH_ACT_L_MASK { 0xFC };
-  }
+  // Status.
+  constexpr uint8_t M_REG_STATUS          { 0x0B };
+
+  // FIFO.
+  constexpr uint8_t M_REG_FIFO_ENTRIES_L  { 0x0C };
+  constexpr uint8_t M_REG_FIFO_ENTRIES_H  { 0x0D };
+  constexpr uint8_t M_REG_I2C_FIFO_DATA   { 0x18 };
+
+  // Soft reset.
+  constexpr uint8_t M_REG_SOFT_RESET      { 0x1F };
+
+  // Activity/Inactivity thresholds.
+  constexpr uint8_t M_REG_THRESH_ACT_H    { 0x20 };
+  constexpr uint8_t M_REG_THRESH_ACT_L    { 0x21 };
+  constexpr uint8_t M_REG_TIME_ACT        { 0x22 };
+  constexpr uint8_t M_REG_THRESH_INACT_H  { 0x23 };
+  constexpr uint8_t M_REG_THRESH_INACT_L  { 0x24 };
+  constexpr uint8_t M_REG_TIME_INACT_H    { 0x25 };
+  constexpr uint8_t M_REG_TIME_INACT_L    { 0x26 };
+
+  // Activity/Inactivity control.
+  constexpr uint8_t M_REG_ACT_INACT_CTL   { 0x27 };
+
+  // FIFO control.
+  constexpr uint8_t M_REG_FIFO_CONTROL    { 0x28 };
+  constexpr uint8_t M_REG_FIFO_SAMPLES    { 0x29 };
+
+  // Interrupt mapping.
+  constexpr uint8_t M_REG_INTMAP1_LOWER   { 0x2A };
+  constexpr uint8_t M_REG_INTMAP2_LOWER   { 0x2B };
+
+  // Filter control.
+  constexpr uint8_t M_REG_FILTER_CTL      { 0x2C };
+
+  // Power control.
+  constexpr uint8_t M_REG_POWER_CTL       { 0x2D };
+
+  // Timer control (wake-up rate).
+  constexpr uint8_t M_REG_TIMER_CTL       { 0x39 };
+
+  // ========== Expected ID Values ==========
+
+  constexpr uint8_t M_DEVID_AD_VALUE      { 0xAD };
+  constexpr uint8_t M_DEVID_MST_VALUE     { 0x1D };
+  constexpr uint8_t M_PART_ID_VALUE       { 0xF7 };
+
+  // ========== Masks and Shifts ==========
+
+  // STATUS register.
+  constexpr uint8_t M_STATUS_DATA_READY   { 0x01 };
+  constexpr uint8_t M_STATUS_FIFO_READY   { 0x02 };
+  constexpr uint8_t M_STATUS_FIFO_WM      { 0x04 };
+  constexpr uint8_t M_STATUS_FIFO_OVERRUN { 0x08 };
+  constexpr uint8_t M_STATUS_ACT          { 0x10 };
+  constexpr uint8_t M_STATUS_INACT        { 0x20 };
+  constexpr uint8_t M_STATUS_AWAKE        { 0x40 };
+  constexpr uint8_t M_STATUS_ERR_USER     { 0x80 };
+
+  // ACT_INACT_CTL shifts.
+  constexpr uint8_t M_ACT_EN_SHIFT        { 0 };
+  constexpr uint8_t M_INACT_EN_SHIFT      { 2 };
+  constexpr uint8_t M_LINKLOOP_SHIFT      { 4 };
+
+  // FIFO_CONTROL (0x28): [7]=reserved, [6:3]=CHANNEL_SELECT, [2]=FIFO_SAMPLES[8], [1:0]=FIFO_MODE.
+  constexpr uint8_t M_FIFO_MODE_MASK      { 0x03 };
+  constexpr uint8_t M_FIFO_SAMPLES_BIT8   { 0x04 };
+  constexpr uint8_t M_FIFO_CHANNEL_SHIFT  { 3 };
+  constexpr uint8_t M_FIFO_CHANNEL_MASK   { 0x78 };
+
+  // FILTER_CTL (0x2C): [7:6]=RANGE, [5]=I2C_HS, [4]=reserved, [3]=EXT_SAMPLE, [2:0]=ODR.
+  constexpr uint8_t M_RANGE_SHIFT         { 6 };
+  constexpr uint8_t M_RANGE_MASK          { 0xC0 };
+  constexpr uint8_t M_I2C_HS_MASK         { 0x20 };
+  constexpr uint8_t M_EXT_SAMPLE_MASK     { 0x08 };
+  constexpr uint8_t M_ODR_MASK            { 0x07 };
+
+  // POWER_CTL (0x2D): [7]=reserved, [6]=EXT_CLK, [5:4]=NOISE, [3]=WAKEUP, [2]=AUTOSLEEP, [1:0]=MEASURE.
+  constexpr uint8_t M_MEASURE_SHIFT       { 0 };
+  constexpr uint8_t M_MEASURE_MASK        { 0x03 };
+  constexpr uint8_t M_MEASURE_STANDBY     { 0 };
+  constexpr uint8_t M_MEASURE_MEASUREMENT { 2 };
+  constexpr uint8_t M_AUTOSLEEP_MASK      { 0x04 };
+  constexpr uint8_t M_WAKEUP_MASK         { 0x08 };
+  constexpr uint8_t M_NOISE_SHIFT         { 4 };
+  constexpr uint8_t M_NOISE_MASK          { 0x30 };
+  constexpr uint8_t M_NOISE_NORMAL        { 0 };
+  constexpr uint8_t M_EXT_CLK_MASK        { 0x40 };
+
+  // TIMER_CTL (0x39): [7:6]=WAKEUP_RATE, [5]=reserved, [4:0]=TIMER_KEEP_ALIVE.
+  constexpr uint8_t M_WAKEUP_RATE_SHIFT   { 6 };
+  constexpr uint8_t M_WAKEUP_RATE_MASK    { 0xC0 };
+  constexpr uint8_t M_KEEP_ALIVE_MASK     { 0x1F };
+
+  // INTMAP1_LOWER (0x2A) / INTMAP2_LOWER (0x2B): same bit layout for INT1/INT2.
+  // [7]=INT_LOW, [6]=AWAKE, [5]=INACT, [4]=ACT, [3]=FIFO_OVERRUN, [2]=FIFO_WM, [1]=FIFO_READY, [0]=DATA_READY.
+  constexpr uint8_t M_INT_DATA_READY_MASK { 0x01 };
+  constexpr uint8_t M_INT_FIFO_READY_MASK { 0x02 };
+  constexpr uint8_t M_INT_FIFO_WM_MASK    { 0x04 };
+  constexpr uint8_t M_INT_FIFO_OVR_MASK   { 0x08 };
+  constexpr uint8_t M_INT_ACT_MASK        { 0x10 };
+  constexpr uint8_t M_INT_INACT_MASK      { 0x20 };
+  constexpr uint8_t M_INT_AWAKE_MASK      { 0x40 };
+  constexpr uint8_t M_INT_LOW_MASK        { 0x80 };
+
+  // Soft reset.
+  constexpr uint8_t M_SOFT_RESET_CODE     { 0x52 };
+
+  // Threshold register masks.
+  constexpr uint8_t M_THRESH_H_MASK       { 0x7F };
+  constexpr uint8_t M_THRESH_L_MASK       { 0xFC };
+
+  // Scale factors (mg per LSB).
+  constexpr float M_SCALE_2G_MG           { 0.25f };
+  constexpr float M_SCALE_4G_MG           { 0.5f };
+  constexpr float M_SCALE_8G_MG           { 1.0f };
 
   // ========== Constructor ==========
 
@@ -120,7 +155,7 @@ namespace alc {
     }
 
     // Wait for device to be ready.
-    k_msleep(STARTUP_DELAY_MS);
+    k_msleep(M_STARTUP_DELAY_MS);
 
     // Verify device ID.
     result = verifyDeviceId();
@@ -136,14 +171,14 @@ namespace alc {
 
   int Adxl367::SoftReset()
   {
-    int result { writeRegister(reg::SOFT_RESET, reg::SOFT_RESET_CODE) };
+    int result { writeRegister(M_REG_SOFT_RESET, M_SOFT_RESET_CODE) };
     if (result < 0) {
       LOG_ERR("Failed to write soft reset: %d!", result);
       return result;
     }
 
     // Wait for reset to complete.
-    k_msleep(RESET_DELAY_MS);
+    k_msleep(M_RESET_DELAY_MS);
 
     LOG_DBG("Soft reset complete.");
     return 0;
@@ -155,27 +190,27 @@ namespace alc {
     uint8_t memsDevId { 0 };
     uint8_t partId { 0 };
 
-    int result { readRegister(reg::DEVID_AD, adDevId) };
+    int result { readRegister(M_REG_DEVID_AD, adDevId) };
     if (result < 0) { return result; }
 
-    result = readRegister(reg::DEVID_MST, memsDevId);
+    result = readRegister(M_REG_DEVID_MST, memsDevId);
     if (result < 0) { return result; }
 
-    result = readRegister(reg::PART_ID, partId);
+    result = readRegister(M_REG_PART_ID, partId);
     if (result < 0) { return result; }
 
-    if (adDevId != reg::DEVID_AD_VALUE) {
-      LOG_ERR("Invalid AD Device ID: 0x%02X (expected 0x%02X)!", adDevId, reg::DEVID_AD_VALUE);
+    if (adDevId != M_DEVID_AD_VALUE) {
+      LOG_ERR("Invalid AD Device ID: 0x%02X (expected 0x%02X)!", adDevId, M_DEVID_AD_VALUE);
       return -ENODEV;
     }
 
-    if (memsDevId != reg::DEVID_MST_VALUE) {
-      LOG_ERR("Invalid MEMS Device ID: 0x%02X (expected 0x%02X)!", memsDevId, reg::DEVID_MST_VALUE);
+    if (memsDevId != M_DEVID_MST_VALUE) {
+      LOG_ERR("Invalid MEMS Device ID: 0x%02X (expected 0x%02X)!", memsDevId, M_DEVID_MST_VALUE);
       return -ENODEV;
     }
 
-    if (partId != reg::PART_ID_VALUE) {
-      LOG_ERR("Invalid Part ID: 0x%02X (expected 0x%02X)!", partId, reg::PART_ID_VALUE);
+    if (partId != M_PART_ID_VALUE) {
+      LOG_ERR("Invalid Part ID: 0x%02X (expected 0x%02X)!", partId, M_PART_ID_VALUE);
       return -ENODEV;
     }
 
@@ -187,13 +222,13 @@ namespace alc {
 
   int Adxl367::SetOperatingMode(OperatingMode mode)
   {
-    uint8_t measureValue { (mode == OperatingMode::Measurement) 
-                           ? reg::MEASURE_MEASUREMENT 
-                           : reg::MEASURE_STANDBY };
+    uint8_t measureValue { (mode == OperatingMode::Measurement)
+                           ? M_MEASURE_MEASUREMENT
+                           : M_MEASURE_STANDBY };
 
-    int result { updateRegister(reg::POWER_CTL, 
-                                measureValue << reg::MEASURE_SHIFT, 
-                                reg::MEASURE_MASK) };
+    int result { updateRegister(M_REG_POWER_CTL,
+                                measureValue << M_MEASURE_SHIFT,
+                                M_MEASURE_MASK) };
     if (result < 0) {
       LOG_ERR("Failed to set operating mode: %d!", result);
       return result;
@@ -201,10 +236,10 @@ namespace alc {
 
     if (mode == OperatingMode::Measurement) {
       // Wait for output to settle.
-      k_msleep(STARTUP_DELAY_MS);
+      k_msleep(M_STARTUP_DELAY_MS);
     }
 
-    LOG_INF("Operating mode set to %s.", 
+    LOG_INF("Operating mode set to %s.",
             (mode == OperatingMode::Measurement) ? "Measurement" : "Standby");
     return 0;
   }
@@ -213,18 +248,18 @@ namespace alc {
   {
     // Per datasheet: wake-up mode requires Normal noise mode.
     uint8_t powerCtl { 0 };
-    int result { readRegister(reg::POWER_CTL, powerCtl) };
+    int result { readRegister(M_REG_POWER_CTL, powerCtl) };
     if (result < 0) {
       LOG_ERR("Failed to read POWER_CTL: %d!", result);
       return result;
     }
 
-    uint8_t noiseMode { static_cast<uint8_t>((powerCtl & reg::NOISE_MASK) >> reg::NOISE_SHIFT) };
-    if (noiseMode != reg::NOISE_NORMAL) {
+    uint8_t noiseMode { static_cast<uint8_t>((powerCtl & M_NOISE_MASK) >> M_NOISE_SHIFT) };
+    if (noiseMode != M_NOISE_NORMAL) {
       LOG_WRN("Wake-up mode requires Normal noise mode. Switching...");
-      result = updateRegister(reg::POWER_CTL, 
-                              reg::NOISE_NORMAL << reg::NOISE_SHIFT, 
-                              reg::NOISE_MASK);
+      result = updateRegister(M_REG_POWER_CTL,
+                              M_NOISE_NORMAL << M_NOISE_SHIFT,
+                              M_NOISE_MASK);
       if (result < 0) {
         LOG_ERR("Failed to set noise mode: %d!", result);
         return result;
@@ -232,16 +267,16 @@ namespace alc {
     }
 
     // Set wake-up rate.
-    result = updateRegister(reg::TIMER_CTL, 
-                            static_cast<uint8_t>(rate) << reg::WAKEUP_RATE_SHIFT, 
-                            reg::WAKEUP_RATE_MASK);
+    result = updateRegister(M_REG_TIMER_CTL,
+                            static_cast<uint8_t>(rate) << M_WAKEUP_RATE_SHIFT,
+                            M_WAKEUP_RATE_MASK);
     if (result < 0) {
       LOG_ERR("Failed to set wake-up rate: %d!", result);
       return result;
     }
 
     // Enable wake-up mode bit.
-    result = updateRegister(reg::POWER_CTL, reg::WAKEUP_MASK, reg::WAKEUP_MASK);
+    result = updateRegister(M_REG_POWER_CTL, M_WAKEUP_MASK, M_WAKEUP_MASK);
     if (result < 0) {
       LOG_ERR("Failed to enable wake-up mode: %d!", result);
       return result;
@@ -254,7 +289,7 @@ namespace alc {
 
   int Adxl367::DisableWakeupMode()
   {
-    int result { updateRegister(reg::POWER_CTL, 0, reg::WAKEUP_MASK) };
+    int result { updateRegister(M_REG_POWER_CTL, 0, M_WAKEUP_MASK) };
     if (result < 0) {
       LOG_ERR("Failed to disable wake-up mode: %d!", result);
       return result;
@@ -268,9 +303,9 @@ namespace alc {
 
   int Adxl367::SetRange(Range range)
   {
-    int result { updateRegister(reg::FILTER_CTL, 
-                                static_cast<uint8_t>(range) << reg::RANGE_SHIFT, 
-                                reg::RANGE_MASK) };
+    int result { updateRegister(M_REG_FILTER_CTL,
+                                static_cast<uint8_t>(range) << M_RANGE_SHIFT,
+                                M_RANGE_MASK) };
     if (result < 0) {
       LOG_ERR("Failed to set range: %d!", result);
       return result;
@@ -285,7 +320,7 @@ namespace alc {
 
   int Adxl367::SetOdr(ODR odr)
   {
-    int result { updateRegister(reg::FILTER_CTL, static_cast<uint8_t>(odr), reg::ODR_MASK) };
+    int result { updateRegister(M_REG_FILTER_CTL, static_cast<uint8_t>(odr), M_ODR_MASK) };
     if (result < 0) {
       LOG_ERR("Failed to set ODR: %d!", result);
       return result;
@@ -300,16 +335,17 @@ namespace alc {
 
   int Adxl367::ConfigureFifo(FifoMode mode)
   {
-    // FIFO_CONTROL (0x28): CHANNEL_SELECT[6:3]=0x0 (XYZ), FIFO_MODE[1:0].
+    // FIFO_CONTROL (0x28): CHANNEL_SELECT[6:3]=0x0 (XYZ), FIFO_SAMPLES[8]=0, FIFO_MODE[1:0].
     uint8_t value { static_cast<uint8_t>(mode) };
-    int result { writeRegister(reg::FIFO_CONTROL, value) };
+    int result { writeRegister(M_REG_FIFO_CONTROL, value) };
     if (result < 0) {
       LOG_ERR("Failed to configure FIFO: %d!", result);
       return result;
     }
 
-    // FIFO_SAMPLES (0x29): Set to 0 (no watermark threshold needed).
-    result = writeRegister(reg::FIFO_SAMPLES, 0);
+    // FIFO_SAMPLES (0x29): Watermark bits [7:0]. Default is 0x80; set to 0
+    // (combined with FIFO_SAMPLES[8]=0 in FIFO_CONTROL, watermark = 0).
+    result = writeRegister(M_REG_FIFO_SAMPLES, 0);
     if (result < 0) {
       LOG_ERR("Failed to set FIFO samples: %d!", result);
       return result;
@@ -325,10 +361,10 @@ namespace alc {
     uint8_t hi { 0 };
     uint8_t lo { 0 };
 
-    int result { readRegister(reg::FIFO_ENTRIES_H, hi) };
+    int result { readRegister(M_REG_FIFO_ENTRIES_H, hi) };
     if (result < 0) { return result; }
 
-    result = readRegister(reg::FIFO_ENTRIES_L, lo);
+    result = readRegister(M_REG_FIFO_ENTRIES_L, lo);
     if (result < 0) { return result; }
 
     // FIFO_ENTRIES is 10-bit: H[1:0] are MSBs, L[7:0] are LSBs.
@@ -357,13 +393,13 @@ namespace alc {
 
     // Bulk read from I2C_FIFO_DATA (0x18).
     // Cap to keep stack usage reasonable.
-    constexpr uint16_t MAX_RAW_BYTES { 30 * 3 * 2 };  // 30 XYZ sets = 180 bytes.
-    uint8_t raw[MAX_RAW_BYTES];
-    if (bytesToRead > MAX_RAW_BYTES) {
-      setsToRead = MAX_RAW_BYTES / 6;
+    constexpr uint16_t M_MAX_RAW_BYTES { 30 * 3 * 2 };  // 30 XYZ sets = 180 bytes.
+    uint8_t raw[M_MAX_RAW_BYTES];
+    if (bytesToRead > M_MAX_RAW_BYTES) {
+      setsToRead = M_MAX_RAW_BYTES / 6;
       bytesToRead = static_cast<uint16_t>(setsToRead * 6);
     }
-    result = readBurst(reg::I2C_FIFO_DATA, raw, bytesToRead);
+    result = readBurst(M_REG_I2C_FIFO_DATA, raw, bytesToRead);
     if (result < 0) {
       LOG_ERR("FIFO bulk read failed: %d!", result);
       return result;
@@ -428,36 +464,36 @@ namespace alc {
 
     // Set activity threshold.
     uint16_t actThresh { mgToThreshold(config.activityThreshold) };
-    result = writeRegister(reg::THRESH_ACT_H, (actThresh >> 6) & reg::THRESH_ACT_H_MASK);
+    result = writeRegister(M_REG_THRESH_ACT_H, (actThresh >> 6) & M_THRESH_H_MASK);
     if (result < 0) { return result; }
-    result = writeRegister(reg::THRESH_ACT_L, (actThresh << 2) & reg::THRESH_ACT_L_MASK);
+    result = writeRegister(M_REG_THRESH_ACT_L, (actThresh << 2) & M_THRESH_L_MASK);
     if (result < 0) { return result; }
 
     // Set activity time.
-    result = writeRegister(reg::TIME_ACT, config.activityTime);
+    result = writeRegister(M_REG_TIME_ACT, config.activityTime);
     if (result < 0) { return result; }
 
     // Set inactivity threshold.
     uint16_t inactThresh { mgToThreshold(config.inactivityThreshold) };
-    result = writeRegister(reg::THRESH_INACT_H, (inactThresh >> 6) & reg::THRESH_ACT_H_MASK);
+    result = writeRegister(M_REG_THRESH_INACT_H, (inactThresh >> 6) & M_THRESH_H_MASK);
     if (result < 0) { return result; }
-    result = writeRegister(reg::THRESH_INACT_L, (inactThresh << 2) & reg::THRESH_ACT_L_MASK);
+    result = writeRegister(M_REG_THRESH_INACT_L, (inactThresh << 2) & M_THRESH_L_MASK);
     if (result < 0) { return result; }
 
     // Set inactivity time (16-bit).
-    result = writeRegister(reg::TIME_INACT_H, (config.inactivityTime >> 8) & 0xFF);
+    result = writeRegister(M_REG_TIME_INACT_H, (config.inactivityTime >> 8) & 0xFF);
     if (result < 0) { return result; }
-    result = writeRegister(reg::TIME_INACT_L, config.inactivityTime & 0xFF);
+    result = writeRegister(M_REG_TIME_INACT_L, config.inactivityTime & 0xFF);
     if (result < 0) { return result; }
 
     // Configure activity/inactivity control register.
     uint8_t ctrlValue { static_cast<uint8_t>(
-        (static_cast<uint8_t>(config.activityMode) << reg::ACT_EN_SHIFT) |
-        (static_cast<uint8_t>(config.inactivityMode) << reg::INACT_EN_SHIFT) |
-        (static_cast<uint8_t>(config.linkLoop) << reg::LINKLOOP_SHIFT)
+        (static_cast<uint8_t>(config.activityMode) << M_ACT_EN_SHIFT) |
+        (static_cast<uint8_t>(config.inactivityMode) << M_INACT_EN_SHIFT) |
+        (static_cast<uint8_t>(config.linkLoop) << M_LINKLOOP_SHIFT)
     )};
-    
-    result = writeRegister(reg::ACT_INACT_CTL, ctrlValue);
+
+    result = writeRegister(M_REG_ACT_INACT_CTL, ctrlValue);
     if (result < 0) { return result; }
 
     LOG_INF("Activity configured: Act=%dmg/%d, Inact=%dmg/%d.",
@@ -469,10 +505,10 @@ namespace alc {
   int Adxl367::ConfigureInterrupt(IntPin pin, bool awake, bool activeLow)
   {
     uint8_t intMap { 0 };
-    if (awake) { intMap |= reg::INT_AWAKE_MASK; }
-    if (activeLow) { intMap |= reg::INT_LOW_MASK; }
+    if (awake) { intMap |= M_INT_AWAKE_MASK; }
+    if (activeLow) { intMap |= M_INT_LOW_MASK; }
 
-    uint8_t regAddr { (pin == IntPin::Int1) ? reg::INTMAP1_LOWER : reg::INTMAP2_LOWER };
+    uint8_t regAddr { (pin == IntPin::Int1) ? M_REG_INTMAP1_LOWER : M_REG_INTMAP2_LOWER };
 
     int result { writeRegister(regAddr, intMap) };
     if (result < 0) {
@@ -489,16 +525,20 @@ namespace alc {
   int Adxl367::ReadStatus(Status& status)
   {
     uint8_t value { 0 };
-    int result { readRegister(reg::STATUS, value) };
+    int result { readRegister(M_REG_STATUS, value) };
     if (result < 0) {
       LOG_ERR("Failed to read status: %d!", result);
       return result;
     }
 
-    status.dataReady = (value & reg::STATUS_DATA_READY_MASK) != 0;
-    status.activityDetected = (value & reg::STATUS_ACT_MASK) != 0;
-    status.inactivityDetected = (value & reg::STATUS_INACT_MASK) != 0;
-    status.awake = (value & reg::STATUS_AWAKE_MASK) != 0;
+    status.dataReady = (value & M_STATUS_DATA_READY) != 0;
+    status.fifoReady = (value & M_STATUS_FIFO_READY) != 0;
+    status.fifoWatermark = (value & M_STATUS_FIFO_WM) != 0;
+    status.fifoOverrun = (value & M_STATUS_FIFO_OVERRUN) != 0;
+    status.activityDetected = (value & M_STATUS_ACT) != 0;
+    status.inactivityDetected = (value & M_STATUS_INACT) != 0;
+    status.awake = (value & M_STATUS_AWAKE) != 0;
+    status.errUserRegs = (value & M_STATUS_ERR_USER) != 0;
 
     return 0;
   }
@@ -517,11 +557,11 @@ namespace alc {
   int Adxl367::SetActivityThreshold(uint16_t thresholdMg)
   {
     uint16_t thresh { mgToThreshold(thresholdMg) };
-    
-    int result { writeRegister(reg::THRESH_ACT_H, (thresh >> 6) & reg::THRESH_ACT_H_MASK) };
+
+    int result { writeRegister(M_REG_THRESH_ACT_H, (thresh >> 6) & M_THRESH_H_MASK) };
     if (result < 0) { return result; }
-    
-    result = writeRegister(reg::THRESH_ACT_L, (thresh << 2) & reg::THRESH_ACT_L_MASK);
+
+    result = writeRegister(M_REG_THRESH_ACT_L, (thresh << 2) & M_THRESH_L_MASK);
     if (result < 0) { return result; }
 
     LOG_INF("Activity threshold updated to %d mg.", thresholdMg);
@@ -531,11 +571,11 @@ namespace alc {
   int Adxl367::SetInactivityThreshold(uint16_t thresholdMg)
   {
     uint16_t thresh { mgToThreshold(thresholdMg) };
-    
-    int result { writeRegister(reg::THRESH_INACT_H, (thresh >> 6) & reg::THRESH_ACT_H_MASK) };
+
+    int result { writeRegister(M_REG_THRESH_INACT_H, (thresh >> 6) & M_THRESH_H_MASK) };
     if (result < 0) { return result; }
-    
-    result = writeRegister(reg::THRESH_INACT_L, (thresh << 2) & reg::THRESH_ACT_L_MASK);
+
+    result = writeRegister(M_REG_THRESH_INACT_L, (thresh << 2) & M_THRESH_L_MASK);
     if (result < 0) { return result; }
 
     LOG_INF("Inactivity threshold updated to %d mg.", thresholdMg);
@@ -544,10 +584,10 @@ namespace alc {
 
   int Adxl367::SetInactivityTime(uint16_t samples)
   {
-    int result { writeRegister(reg::TIME_INACT_H, (samples >> 8) & 0xFF) };
+    int result { writeRegister(M_REG_TIME_INACT_H, (samples >> 8) & 0xFF) };
     if (result < 0) { return result; }
-    
-    result = writeRegister(reg::TIME_INACT_L, samples & 0xFF);
+
+    result = writeRegister(M_REG_TIME_INACT_L, samples & 0xFF);
     if (result < 0) { return result; }
 
     LOG_INF("Inactivity time updated to %d samples.", samples);
@@ -579,7 +619,7 @@ namespace alc {
   int Adxl367::writeRegister(uint8_t reg, uint8_t value)
   {
     uint8_t buffer[2] { reg, value };
-    
+
     int result { i2c_write(m_i2c, buffer, sizeof(buffer), m_i2cAddr) };
     if (result < 0) {
       LOG_ERR("I2C write failed: reg=0x%02X, err=%d!", reg, result);
@@ -634,13 +674,13 @@ namespace alc {
   {
     switch (m_currentRange) {
       case Range::Range2g:
-        return reg::SCALE_2G_MG;
+        return M_SCALE_2G_MG;
       case Range::Range4g:
-        return reg::SCALE_4G_MG;
+        return M_SCALE_4G_MG;
       case Range::Range8g:
-        return reg::SCALE_8G_MG;
+        return M_SCALE_8G_MG;
       default:
-        return reg::SCALE_2G_MG;
+        return M_SCALE_2G_MG;
     }
   }
 
