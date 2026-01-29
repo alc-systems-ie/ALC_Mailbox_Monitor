@@ -144,7 +144,7 @@ Devices start in **provisioning mode** when first powered on (or after NVS magic
 | `{"disable": true}` | Disable device, enter provisioning mode on next boot |
 | `{"poll_interval": 30}` | Set provisioning poll interval (10-300 seconds) |
 
-Commands should be **retained messages**. The enable/disable commands are automatically cleared after being processed to prevent repeated execution.
+Commands should be **retained messages**. All recognized commands are automatically cleared after being processed to prevent repeated execution on subsequent wakes.
 
 ### State Persistence
 

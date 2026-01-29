@@ -975,6 +975,11 @@ namespace alc
     int value;
     bool configChanged { false };
 
+    // Clear retained command for any recognized command to prevent re-execution.
+    if (cmd != MqttCommand::UNKNOWN) {
+      clearRetainedCommand();
+    }
+
     switch (cmd) {
       case MqttCommand::RESET_CONFIG:
         LOG_INF("Resetting configuration to defaults...");
@@ -1077,7 +1082,6 @@ namespace alc
 
       case MqttCommand::DEVICE_RESET:
         LOG_INF("Device reset requested.");
-        clearRetainedCommand();
         // Disable device so it returns to provisioning mode after reset.
         setEnabled(false);
         executeDeviceReset();
@@ -1086,13 +1090,11 @@ namespace alc
 
       case MqttCommand::ENABLE:
         LOG_INF("Enable command received.");
-        clearRetainedCommand();
         setEnabled(true);
         break;
 
       case MqttCommand::DISABLE:
         LOG_INF("Disable command received.");
-        clearRetainedCommand();
         setEnabled(false);
         break;
 
