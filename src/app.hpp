@@ -35,7 +35,7 @@
 #include "modem.hpp"
 #include "mqtt.hpp"
 #include "npm1300.hpp"
-// #include "retained.hpp"
+#include "retained.hpp"
 
 namespace alc
 {
@@ -44,6 +44,13 @@ namespace alc
   // Timing defaults (configurable via MQTT).
   constexpr uint32_t M_MAIL_WINDOW_SECS { 240 };        // 4 minutes - defines open/close cycle.
   constexpr uint32_t M_HEARTBEAT_HOUR { 3 };            // 3am for nightly heartbeat.
+
+  // Door-open escalating timer durations (seconds).
+  // Stage 1: 4 minutes, Stage 2: 1 hour, Stage 3: 2 hours.
+  // Testing values: 20s / 30s / 40s — swap comments for production.
+  constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 20, 30, 40 };     // Testing.
+  // constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 240, 3600, 7200 }; // Production.
+  constexpr uint8_t M_DOOR_OPEN_MAX_STAGE { 3 };
 
   // ADXL367 defaults (configurable via MQTT).
   constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 250 };   // Activity threshold in mg.
@@ -215,11 +222,12 @@ namespace alc
       void disconnectFromCloud();
 
       /**
-       * @brief Send mail delivered event.
+       * @brief Send a mailbox event (visited or open).
        * @param timestamp Event timestamp (seconds since boot, TODO: RTC epoch).
        * @param ownerIntervened Whether owner signalled (placeholder for future).
+       * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened);
+      bool sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type);
 
       /**
        * @brief Send all buffered mail events.

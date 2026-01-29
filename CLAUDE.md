@@ -28,10 +28,10 @@ Single wake event per mail delivery cycle:
 1. **System OFF**: Device sleeps (~180nA, ADXL367 wake-up mode)
 2. **Motion detected**: ADXL367 AWAKE rises → MCU wakes from System OFF
 3. **Poll AWAKE**: MCU stays awake polling until AWAKE clears (door closed)
-4. **Send event**: Connect to MQTT, send `mail_delivered`, disconnect
+4. **Send event**: Connect to MQTT, send `mailbox_visited` or `mailbox_open`, disconnect
 5. **System OFF**: Return to sleep
 
-The nPM1300 GP Timer is used for fresh boot initialisation (3s timer to establish ready state) and may be used for future heartbeat timing. It is no longer part of the core open/close state machine.
+The nPM1300 GP Timer drives an escalating door-open notification sequence when the door is left open. It also handles fresh boot initialisation (3s timer to establish ready state) and may be used for future heartbeat timing.
 
 ### Source Files
 
@@ -163,13 +163,14 @@ Commands should be **retained messages**. The enable/disable commands are automa
 
 ### State Persistence
 
-The `enabled` and `poll_interval` values are stored in NVS flash and persist across System OFF cycles:
+The `enabled`, `poll_interval`, and `door_open_stage` values are stored in NVS flash and persist across System OFF cycles:
 
 ```cpp
 struct RetainedState {
     ...
-    bool enabled;           // Device operational state
-    uint16_t poll_interval; // Provisioning poll interval (seconds)
+    bool enabled;              // Device operational state
+    uint8_t door_open_stage;   // Escalating door-open timer (0=inactive, 1-3)
+    uint16_t poll_interval;    // Provisioning poll interval (seconds)
     ...
 };
 ```
@@ -282,7 +283,9 @@ The 3-second timer initialisation on fresh boot establishes the "ready for OPEN"
 enum class WakeSource { Accelerometer, Timer, HallSensor, PowerOn };
 ```
 
-Hall sensor (P0.02) stubbed but not implemented.
+- **Accelerometer (P0.11):** ADXL367 INT1 — motion detection, always enabled.
+- **Timer (P0.02):** nPM1300 SHPHLD GPIO — door-open escalating timer and future heartbeat. Always configured as wake source; no-op if no timer is running.
+- **Hall sensor:** Stubbed but not implemented.
 
 ### ADXL367 AWAKE State Before System OFF
 
@@ -339,18 +342,44 @@ In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activit
 
 ### Motion Detection State Machine
 
-The new approach uses a single-wake design instead of the previous two-wake OPEN/CLOSE model:
+The approach uses a single-wake design with three event classifications:
 
 1. **Wake from System OFF** (ADXL367 AWAKE rising edge)
-2. **Poll AWAKE** until it clears (door closed / device returned to rest)
-   - Safety timeout prevents infinite wait if door left open
-3. **Read settled position** via `ReadAxes()` to confirm home orientation
-4. **Send mail_delivered event** via MQTT
-5. **Enter System OFF**
+2. **Capture AWAKE state** at boot (before driver init resets the sensor)
+3. **Classify event:**
 
-The nPM1300 timer is no longer needed for the open/close state machine. It may still be used for heartbeat timing.
+**Case 1 (Bump):** AWAKE was LOW at boot — motion ended before MCU started. Ignored.
 
-**Power consideration:** MCU stays in standby polling I2C during the open period. With modem off, this is modest power draw. A door left open for minutes costs more than a quick open/close, but this is a rare edge case.
+**Case 2 (Mail delivery):** AWAKE was HIGH at boot, device returns to home position within 30s timeout. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
+
+**Case 3 (Door left open):** AWAKE was HIGH at boot, 30s poll timeout expires, device NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
+
+### Escalating Door-Open Timer
+
+When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalating notifications via System OFF wake on P0.02:
+
+| Stage | Duration (production) | Duration (testing) | Action on expiry |
+|-------|----------------------|-------------------|-----------------|
+| 1 | 4 minutes | 20 seconds | Send notification, start stage 2 timer |
+| 2 | 1 hour | 30 seconds | Send notification, start stage 3 timer |
+| 3 | 2 hours | 40 seconds | Send final notification, stop (no more timers) |
+
+**Durations** are defined in `M_DOOR_OPEN_DURATIONS[]` in `app.hpp`. Testing and production values are provided; swap the active line to switch.
+
+**Persistence:** The current stage (`door_open_stage`, 0-3) is stored in `RetainedState` in NVS flash, surviving System OFF. This allows the firmware to know on a timer wake which stage to escalate to next.
+
+**Flow:**
+1. Case 3 detected → check `door_open_stage`. If already at max (3), do nothing.
+2. Otherwise start timer with `M_DOOR_OPEN_DURATIONS[stage]`, set `door_open_stage = stage + 1`.
+3. Timer expires → `handleTimerWake()` sends notification, checks if `stage < 3`.
+4. If under cap: start next timer, increment stage. If at cap: reset stage to 0, stop.
+5. Door close at any point (case 2): stop timer hardware, disable interrupt, reset stage to 0.
+
+**Wake sources for System OFF:**
+- P0.11 (ADXL367 INT1): Motion detection — always enabled.
+- P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
+
+**Power consideration:** MCU stays in standby polling I2C during the initial 30s open period. With modem off, this is modest power draw. After timeout, device enters System OFF and only wakes briefly on each timer expiry to send a notification.
 
 ### FIFO Configuration
 
@@ -364,7 +393,7 @@ The nPM1300 timer is no longer needed for the open/close state machine. It may s
 - Samples arrive in X, Y, Z order (3 samples per XYZ set)
 
 **Known Issues / Quirks:**
-- `mail_delivered` MQTT publish currently suppressed for testing
+- `mailbox_visited` MQTT publish currently suppressed for testing
 - Main stack increased to 8K for analysis buffers — review if this can be reduced
 
 ### Event Buffering (NVS Flash)
@@ -375,16 +404,23 @@ Mail delivery events are buffered in NVS flash when network connectivity fails. 
 
 **Structure (`retained.hpp`):**
 ```cpp
+enum class EventType : uint8_t {
+    MailboxVisited = 0,   // Door opened and closed (delivery or collection)
+    MailboxOpen = 1       // Door left open (escalating timer notification)
+};
+
 struct BufferedEvent {
     uint32_t timestamp;       // Seconds since boot (TODO: RTC epoch)
     bool owner_intervened;    // Future: hall sensor detected
+    EventType event_type;     // mailbox_visited or mailbox_open
 };
 
 struct RetainedState {
-    uint32_t magic;           // 0x4D41494D ("MAIM") for validity - version 2
+    uint32_t magic;           // 0x4D414950 ("MAIP") for validity - version 5
     uint8_t event_count;      // Number of buffered events
     uint8_t max_events;       // Runtime configurable (1-20)
     bool enabled;             // Device operational state (false = provisioning)
+    uint8_t door_open_stage;  // Escalating door-open timer stage (0=inactive, 1-3)
     uint16_t poll_interval;   // Provisioning poll interval (seconds)
     BufferedEvent events[20]; // Circular buffer, oldest at index 0
 };
@@ -406,7 +442,7 @@ When sending multiple buffered events (catch-up after outage):
 **Event Message Format:**
 ```json
 {
-  "event": "mail_delivered",
+  "event": "mailbox_visited",
   "timestamp": 12345,
   "owner_intervened": false
 }
@@ -414,9 +450,13 @@ When sending multiple buffered events (catch-up after outage):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event` | string | Always `"mail_delivered"` |
+| `event` | string | `"mailbox_visited"` or `"mailbox_open"` (see below) |
 | `timestamp` | uint32 | Seconds since device boot (TODO: RTC epoch) |
 | `owner_intervened` | bool | `true` suppresses SMS notification |
+
+**Event Types:**
+- `mailbox_visited` — Door opened and closed (case 2). Covers both mail delivery and collection; the device cannot discriminate between the two.
+- `mailbox_open` — Door left open (timer wake). Sent by the escalating door-open timer sequence (up to 3 notifications).
 
 The `timestamp` field currently uses uptime in seconds. Future hardware revision will include RTC for epoch timestamps.
 

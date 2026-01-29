@@ -288,11 +288,32 @@ namespace alc
         LOG_INF("╔════════════════════════════════════════╗");
         LOG_INF("║       DOOR LEFT OPEN                   ║");
         LOG_INF("╚════════════════════════════════════════╝");
-        // TODO: Send door_open event.
-        // TODO: Start incremental timer (4min → 1hr → 2hr) via nPM1300.
-        // TODO: Recalibrate ADXL367 to allow System OFF.
-        // TODO: Stop incremental timer at every close event.
-        LOG_INF("Door-open handling not yet implemented - sleeping.");
+
+        uint8_t stage { getDoorOpenStage() };
+
+        // Already sent all 3 notifications — no more timers.
+        if (stage >= M_DOOR_OPEN_MAX_STAGE) {
+          LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
+          configureMotionSensor();
+          return;
+        }
+
+        // Start the next escalating timer (stage 0→1, 1→2, 2→3).
+        uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
+
+        configureMailWindowTimer();
+        m_pmic.TimerClearEvent();
+        m_pmic.TimerSetDuration(duration);
+        m_pmic.TimerEnableInterrupt();
+        m_pmic.TimerStart();
+
+        setDoorOpenStage(stage + 1);
+        LOG_INF("Door-open timer stage %u started: %u seconds. Entering System OFF.",
+                stage + 1, duration);
+
+        // Recalibrate ADXL367 so a door-close also triggers a wake.
+        configureMotionSensor();
+
         return;
       }
 
@@ -315,7 +336,14 @@ namespace alc
     // Case 2: Mail delivery — AWAKE was HIGH at boot, device now at home.
     // =========================================================================
 
-    // TODO: Stop incremental timer if running (case 3 recovery).
+    // Stop door-open timer if running (case 3 recovery).
+    if (getDoorOpenStage() > 0) {
+      LOG_INF("Stopping door-open timer stage %u (door closed).", getDoorOpenStage());
+      m_pmic.TimerStop();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerDisableInterrupt();
+      setDoorOpenStage(0);
+    }
 
     // ===== MAIL DELIVERY =====
     LOG_INF("╔════════════════════════════════════════╗");
@@ -372,35 +400,61 @@ namespace alc
       // Does not return (loops until enabled, then reboots).
     }
 
-    // Normal heartbeat mode.
+    uint8_t stage { getDoorOpenStage() };
+
+    // Door-open timer expired — send notification.
     LOG_INF("╔════════════════════════════════════════╗");
-    LOG_INF("║          TIMER WAKE (HEARTBEAT)        ║");
+    LOG_INF("║   TIMER WAKE (DOOR OPEN stage %u)      ║", stage);
     LOG_INF("╚════════════════════════════════════════╝");
 
-    // Initialise network hardware for heartbeat.
+    // Disable timer interrupt (will re-enable if escalating).
+    m_pmic.TimerDisableInterrupt();
+
+    // Buffer a mailbox_open event.
+    uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
+    bufferMailEvent(timestamp, false, EventType::MailboxOpen);
+
+    // Initialise network hardware.
     if (!initNetworkHardware()) {
-      LOG_ERR("Network init failed for heartbeat!");
-      return;
-    }
-
-    // Connect and send heartbeat (also sends any buffered events).
-    if (connectToCloud()) {
-      // Send any buffered events first.
-      if (hasBufferedEvents()) {
-        LOG_INF("Sending %d buffered events...", getBufferedEventCount());
-        sendBufferedEvents();
+      LOG_ERR("Network init failed - mailbox_open event buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
+    } else if (connectToCloud()) {
+      if (sendBufferedEvents()) {
+        LOG_INF("Door-open event (stage %u) sent successfully.", stage);
+        sendBatteryStatus();
+        collectMqttCommands();
+      } else {
+        LOG_ERR("Failed to send door-open event!");
       }
-
-      sendHeartbeat();
-      sendBatteryStatus();
-      collectMqttCommands();
       disconnectFromCloud();
     } else {
-      LOG_ERR("Failed to connect for heartbeat!");
+      LOG_ERR("Failed to connect - door-open event buffered for later.");
+      LOG_INF("Buffered events: %d", getBufferedEventCount());
     }
 
-    // TODO: Restart timer for next heartbeat (24 hours).
-    // For now, heartbeat timer is not implemented.
+    // Escalate: start next timer if under the cap.
+    if (stage < M_DOOR_OPEN_MAX_STAGE) {
+      uint32_t duration { M_DOOR_OPEN_DURATIONS[stage] };
+
+      configureMailWindowTimer();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerSetDuration(duration);
+      m_pmic.TimerEnableInterrupt();
+      m_pmic.TimerStart();
+
+      setDoorOpenStage(stage + 1);
+      LOG_INF("Escalating: door-open timer stage %u started (%u seconds).",
+              stage + 1, duration);
+    } else {
+      LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
+      setDoorOpenStage(0);
+    }
+
+    // Recalibrate ADXL367 so door-close triggers a new accelerometer wake.
+    int recalResult = configureMotionSensor();
+    if (recalResult < 0) {
+      LOG_ERR("ADXL367 recalibration failed: %d", recalResult);
+    }
 
     LOG_INF("Timer wake handling complete.");
   }
@@ -592,27 +646,30 @@ namespace alc
     return true;
   }
 
-  bool App::sendMailDeliveredEvent(uint32_t timestamp, bool ownerIntervened)
+  bool App::sendMailboxEvent(uint32_t timestamp, bool ownerIntervened, EventType type)
   {
     char topic[64];
     char message[256];
 
+    const char* eventName = (type == EventType::MailboxOpen) ? "mailbox_open" : "mailbox_visited";
+
     // TODO: When RTC is fitted, timestamp will be Unix epoch.
     // For now it's seconds since boot.
     int len { snprintf(message, sizeof(message),
-                       "{\"event\":\"mail_delivered\","
+                       "{\"event\":\"%s\","
                        "\"timestamp\":%u,"
                        "\"owner_intervened\":%s}",
+                       eventName,
                        timestamp,
                        ownerIntervened ? "true" : "false") };
 
     buildTopic(topic, sizeof(topic), M_SUFFIX_EVENTS);
 
-    LOG_INF("Sending mail delivered event: %s", message);
+    LOG_INF("Sending event: %s", message);
 
     // TODO: Re-enable when FIFO testing complete.
     // if (!m_mqtt.Publish(topic, message, len, false)) {
-    //   LOG_ERR("Failed to publish mail event!");
+    //   LOG_ERR("Failed to publish event!");
     //   return false;
     // }
     LOG_INF("(MQTT publish suppressed for FIFO testing)");
@@ -652,7 +709,7 @@ namespace alc
                 i + 1, count, event.timestamp, event.owner_intervened);
       }
 
-      if (!sendMailDeliveredEvent(event.timestamp, ownerIntervened)) {
+      if (!sendMailboxEvent(event.timestamp, ownerIntervened, event.event_type)) {
         LOG_ERR("Failed to send buffered event %d", i);
         allSent = false;
         // Continue trying to send remaining events.
@@ -1223,11 +1280,11 @@ namespace alc
 
     nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_HIGH);
 
-    // Future: Configure PMIC GPIO for timer wake (heartbeat).
-    // nrf_gpio_cfg_input(PIN_PMIC_INT, NRF_GPIO_PIN_PULLDOWN);
-    // nrf_gpio_cfg_sense_set(PIN_PMIC_INT, NRF_GPIO_PIN_SENSE_HIGH);
+    // Configure PMIC GPIO for timer wake (door-open / heartbeat).
+    nrf_gpio_cfg_input(PIN_PMIC_INT, NRF_GPIO_PIN_PULLDOWN);
+    nrf_gpio_cfg_sense_set(PIN_PMIC_INT, NRF_GPIO_PIN_SENSE_HIGH);
 
-    LOG_INF("Wake sources configured: Accel (P0.%d)", PIN_ACCEL_INT);
+    LOG_INF("Wake sources configured: Accel (P0.%d), PMIC (P0.%d)", PIN_ACCEL_INT, PIN_PMIC_INT);
   }
 
   void App::shutdownModem()
