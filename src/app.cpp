@@ -270,10 +270,15 @@ namespace alc
       k_msleep(M_AWAKE_POLL_MS);
       elapsed = static_cast<uint32_t>(k_uptime_get() - startTime);
 
+      // Read data registers on every poll cycle. This drains the FIFO/data
+      // pipeline, which appears necessary for the inactivity counter to
+      // advance and AWAKE to clear. Without regular reads, AWAKE can stick
+      // HIGH indefinitely even when the device is stationary at home.
+      int16_t x { 0 }, y { 0 }, z { 0 };
+      m_motion.ReadAxes(x, y, z);
+
       // Log progress every 5 seconds.
       if ((elapsed % 5000) < M_AWAKE_POLL_MS) {
-        int16_t x { 0 }, y { 0 }, z { 0 };
-        m_motion.ReadAxes(x, y, z);
         LOG_INF("[%5u ms] AWAKE=1 | X=%d Y=%d Z=%d mg", elapsed, x, y, z);
       }
     }
