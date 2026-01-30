@@ -1395,8 +1395,16 @@ namespace alc
       }
 
       if (elapsed >= TIMEOUT_MS) {
-        LOG_ERR("AWAKE stuck HIGH after %u ms — forcing system restart.", TIMEOUT_MS);
-        sys_reboot(SYS_REBOOT_COLD);
+        // AWAKE stuck HIGH. Re-run loop mode startup sequence with dummy
+        // thresholds to force an activity→inactivity cycle and clear AWAKE.
+        // This is acceptable here — we're about to sleep, and the reference
+        // will be recaptured at the current (home) position.
+        LOG_WRN("AWAKE stuck HIGH — re-running loop mode init to clear...");
+        int recalResult { configureMotionSensor() };
+        if (recalResult < 0) {
+          LOG_ERR("Loop mode re-init failed: %d — forcing system restart.", recalResult);
+          sys_reboot(SYS_REBOOT_COLD);
+        }
       } else {
         LOG_INF("ADXL367 returned to inactive state after %u ms.", elapsed);
       }
