@@ -89,15 +89,17 @@ All commands are sent as JSON to `alc/{DEVICE_ID}/commands` (retained messages r
 | `reset_config` | `{"reset_config": true}` | Reset all parameters to defaults |
 | `status_request` | `{"status_request": true}` | Publish current config to status topic |
 | `reset_device` | `{"reset_device": true}` | Reboot device, returns to provisioning mode |
+| `calibrate` | `{"calibrate": true}` | Recalibrate home position to current orientation (dev) |
+| `report_position` | `{"report_position": true}` | Publish current XYZ + stored home to status topic (dev) |
 
 ### Adjustable Parameters
 
 | Parameter | Command | Default | Range | Unit | Description |
 |-----------|---------|---------|-------|------|-------------|
 | `mail_window` | `{"mail_window": 300}` | 240 | 1–86400 | seconds | Open/close cycle timeout |
-| `activity_threshold` | `{"activity_threshold": 200}` | 250 | 1–8000 | mg | Motion sensitivity to wake |
+| `activity_threshold` | `{"activity_threshold": 200}` | 200 | 1–8000 | mg | Motion sensitivity to wake |
 | `activity_time` | `{"activity_time": 2}` | 1 | 1–255 | samples | Samples above threshold to trigger |
-| `inactivity_threshold` | `{"inactivity_threshold": 1000}` | 250 | 1–8000 | mg | Threshold to detect rest (referenced) |
+| `inactivity_threshold` | `{"inactivity_threshold": 1000}` | 150 | 1–8000 | mg | Threshold to detect rest (referenced) |
 | `inactivity_time` | `{"inactivity_time": 15}` | 10 | 1–255 | samples | Samples below threshold for inactive |
 | `max_buffered_events` | `{"max_buffered_events": 15}` | 10 | 1–20 | events | Offline event buffer size |
 | `poll_interval` | `{"poll_interval": 30}` | 60 | 10–300 | seconds | Provisioning mode poll frequency |
@@ -161,6 +163,8 @@ struct RetainedState {
     uint8_t activityTime;           // ADXL367 activity time
     uint16_t inactivityThresholdMg; // ADXL367 inactivity threshold
     uint8_t inactivityTime;         // ADXL367 inactivity time
+    int16_t homeX, homeY, homeZ;    // Calibrated home position (mg)
+    bool homeCalibrated;            // True if home position has been calibrated
     ...
 };
 ```
@@ -277,19 +281,31 @@ enum class WakeSource { Accelerometer, Timer, HallSensor, PowerOn };
 - **Timer (P0.02):** nPM1300 SHPHLD GPIO — door-open escalating timer and future heartbeat. Always configured as wake source; no-op if no timer is running.
 - **Hall sensor:** Stubbed but not implemented.
 
+### ADXL367 Sensor Autonomy (Critical Design Principle)
+
+The ADXL367 runs autonomously during System OFF at ~180nA in loop mode with autosleep. **It must NOT be reinitialised on System OFF wakes.** Only `Init()` and `configureMotionSensor()` on fresh boot (PowerOn) or when explicitly reconfiguring via MQTT command.
+
+**Why:** The loop mode startup sequence captures a reference point (the device's current orientation) during the dummy threshold cycle. This reference is what AWAKE compares against — AWAKE=1 means displaced from reference, AWAKE=0 means at reference (home). Reinitialising on every wake destroys this reference, causing AWAKE to stick HIGH because the new reference is captured at whatever transient position the device is in during the ~50ms init.
+
+**Consequence:** `initHardware()` accepts `WakeSource` and skips ADXL367 init for accelerometer/timer wakes. No `configureMotionSensor()` calls in the door-open or timer-wake paths.
+
+### ADXL367 AWAKE Monitoring — Use P0.11 GPIO, Not Status Register
+
+Always use `nrf_gpio_pin_read(PIN_ACCEL_INT)` to check AWAKE state, never `m_motion.IsAwake()` (which reads status register 0x0B). Reading the status register clears ACT/INACT flags, which can interfere with the loop mode state machine and prevent autosleep transitions.
+
 ### ADXL367 AWAKE State Before System OFF
 
-The GPIO latch only captures **rising edges**. Before entering System OFF, the firmware waits for ADXL367 to return to inactive state (AWAKE=0). If AWAKE=1 when entering System OFF, and it clears during boot, no rising edge occurs and the latch won't be set - causing wake source detection to fail.
+The GPIO latch only captures **rising edges**. Before entering System OFF, the firmware waits for AWAKE to clear (P0.11 = 0). If AWAKE=1 when entering System OFF, and it clears during boot, no rising edge occurs and the latch won't be set — causing wake source detection to fail.
 
-See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval).
+See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval). If AWAKE is stuck HIGH after timeout, the device forces a system restart.
 
 ### ADXL367 Loop Mode with Referenced Activity/Inactivity
 
-The ADXL367 uses **loop mode** with **referenced** activity and inactivity detection. Referenced mode compares acceleration against a reference point captured at the last state transition, rather than against an absolute value. This correctly detects orientation changes (lid open/close) that don't exceed absolute thresholds.
+The ADXL367 uses **loop mode** with **referenced** activity and inactivity detection. Referenced mode compares acceleration against a reference point captured at the last state transition, rather than against an absolute value. This detects **displacement** (orientation change), not movement — a device held still on its side with AWAKE=1 will stay that way indefinitely.
 
 **Configuration:**
-- Activity: Referenced, 250mg threshold, 1 sample
-- Inactivity: Referenced, 250mg threshold, 10 samples (~1.6s at 6 SPS)
+- Activity: Referenced, 200mg threshold, 1 sample
+- Inactivity: Referenced, 150mg threshold, 10 samples (~1.6s at 6 SPS)
 - Link/loop: Loop (auto-acknowledged, sequential act→inact)
 - Autosleep enabled (POWER_CTL bit 2): device autonomously switches between measurement and wake-up mode
 
@@ -317,9 +333,10 @@ In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activit
 
 **Behaviour:**
 - Device sleeps in home position (AWAKE=0, ~180nA wake-up mode)
-- Any movement exceeding 250mg from reference → AWAKE=1 (activity detected)
-- Device must settle within 250mg of a new reference for 10 samples → AWAKE=0
-- Device only returns to AWAKE=0 in its home position, not on an edge/tilted
+- Any displacement exceeding 200mg from reference → AWAKE=1 (activity detected)
+- Device must settle within 150mg of a new reference for 10 samples → AWAKE=0
+- Referenced mode detects **displacement**, not movement — a still device at a non-home orientation keeps AWAKE=1 indefinitely
+- Device only returns to AWAKE=0 when back at the home position (reference captured at enable time)
 - If door is left open (different orientation from home), AWAKE stays HIGH
 
 **Register Naming Convention:**
@@ -334,17 +351,30 @@ In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activit
 
 The approach uses a single-wake design with three event classifications:
 
-1. **Wake from System OFF** (ADXL367 AWAKE rising edge)
-2. **Capture AWAKE state** at boot (before driver init resets the sensor)
+1. **Wake from System OFF** (ADXL367 AWAKE rising edge on P0.11)
+2. **Capture AWAKE state** at boot (before any driver init, in `main.cpp`)
 3. **Classify event:**
 
 **Case 1 (Bump):** AWAKE was LOW at boot — motion ended before MCU started. Ignored.
 
-**Case 2 (Mailbox visited):** AWAKE was HIGH at boot, device settles at home position. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
+**Case 2 (Mailbox visited):** AWAKE was HIGH at boot, polls P0.11 until AWAKE clears, device settles at home position. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
 
-**Case 3 (Door left open):** AWAKE was HIGH at boot, device settles but NOT at home position. Starts the escalating door-open timer sequence (see below). ADXL367 is recalibrated so a door-close will also trigger a wake.
+**Case 3 (Door left open):** AWAKE was HIGH at boot, 15s AWAKE timeout fires (device displaced from home, AWAKE stays HIGH). Starts the escalating door-open timer sequence (see below).
 
-**Important:** Case 3 triggers on position (NOT HOME), not on the 15s AWAKE timeout. Because `configureMotionSensor()` resets the ADXL367 reference on boot, AWAKE clears instantly when the box is stable in the open position — the 30s timeout never fires. The timeout remains only as a safety net for a genuinely stuck AWAKE signal.
+**Important:** The ADXL367 is NOT reinitialised on System OFF wakes. The reference point from enable time is preserved, so AWAKE correctly reflects displacement from the true home position. When the door closes (device returns to home), AWAKE clears naturally, and the next displacement triggers a rising edge wake — no recalibration needed.
+
+### Home Position Calibration
+
+The device's home position is calibrated during the enable sequence and stored in NVS flash. This is the reference for XYZ-based home/not-home classification (used alongside the AWAKE signal).
+
+**Calibration process** (runs on `{"enable": true}` command):
+1. Read 32 XYZ samples at 50ms intervals
+2. Average each axis
+3. Store in NVS as `homeX`, `homeY`, `homeZ`
+
+**Recalibration:** Send `{"calibrate": true}` via MQTT to recalibrate without a full disable/enable cycle. Device must be in its installed home position when this command is processed.
+
+**Position reporting:** Send `{"report_position": true}` to publish current XYZ + stored home position to the status topic.
 
 ### Escalating Door-Open Timer
 
@@ -373,7 +403,9 @@ When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalati
 - P0.11 (ADXL367 INT1): Motion detection — always enabled.
 - P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
 
-**Power consideration:** During the initial wake, the MCU polls AWAKE briefly (typically 0ms when door is stable open, up to 15s safety timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
+**Door close during escalation:** When the door is closed (device returns to home), the ADXL367 reference from enable time causes AWAKE to clear and then reassert on the next displacement. The resulting rising edge on P0.11 wakes the MCU, which classifies Case 2 (HOME), stops the timer, and resets the stage to 0.
+
+**Power consideration:** During the initial wake, the MCU polls AWAKE via P0.11 (up to 15s timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
 
 ### FIFO Configuration
 
@@ -409,7 +441,7 @@ struct BufferedEvent {
 };
 
 struct RetainedState {
-    uint32_t magic;               // 0x4D414951 ("MAIQ") for validity - version 6
+    uint32_t magic;               // 0x4D414954 ("MAIT") for validity
     uint8_t event_count;          // Number of buffered events
     uint8_t max_events;           // Runtime configurable (1-20)
     bool enabled;                 // Device operational state (false = provisioning)
@@ -420,6 +452,10 @@ struct RetainedState {
     uint8_t activityTime;         // ADXL367 activity time (samples)
     uint16_t inactivityThresholdMg; // ADXL367 inactivity threshold (mg)
     uint8_t inactivityTime;       // ADXL367 inactivity time (samples)
+    int16_t homeX;                // Calibrated home position X (mg)
+    int16_t homeY;                // Calibrated home position Y (mg)
+    int16_t homeZ;                // Calibrated home position Z (mg)
+    bool homeCalibrated;          // True if home position has been calibrated
     BufferedEvent events[20];     // Circular buffer, oldest at index 0
 };
 ```
@@ -481,10 +517,10 @@ The `timestamp` field currently uses uptime in seconds. Future hardware revision
 
 To support fast mail deliveries (< 5 seconds open-to-close), hardware init is split:
 
-1. **Essential init** (always): PMIC, ADXL367 (~1.5 seconds)
+1. **Essential init** (always): PMIC only on System OFF wakes; PMIC + ADXL367 on fresh boot
 2. **Network init** (CLOSE only): Modem, MQTT (deferred)
 
-OPEN events skip network init entirely, reducing wake-to-sleep time from ~4.6s to ~1.5s.
+On System OFF wakes, ADXL367 init is skipped entirely (sensor is autonomous), further reducing wake-to-sleep time.
 
 **Note:** LED code has been removed for production. Files `led.cpp/hpp` remain in repo but are not compiled.
 

@@ -57,7 +57,7 @@ namespace alc
     // =========================================================================
     // Initialise hardware.
     // =========================================================================
-    if (!initHardware()) {
+    if (!initHardware(wake)) {
       LOG_ERR("Hardware initialisation failed!");
       // Brief error indication then reset.
       k_sleep(K_SECONDS(5));
@@ -111,7 +111,7 @@ namespace alc
 
   // ========== Hardware Initialisation ==========
 
-  bool App::initHardware()
+  bool App::initHardware(WakeSource wake)
   {
     LOG_INF("Device ID: %s", M_DEVICE_ID);
 
@@ -136,21 +136,32 @@ namespace alc
     }
     LOG_INF("nPM1300 PMIC initialised.");
 
-    // Initialise ADXL367.
-    int result = m_motion.Init();
-    if (result < 0) {
-      LOG_ERR("ADXL367 init failed: %d!", result);
-      return false;
-    }
-    LOG_INF("ADXL367 initialised.");
+    // =========================================================================
+    // ADXL367: Only init + configure on fresh boot / power-on.
+    // On System OFF wake (accelerometer or timer), the sensor is already
+    // running autonomously in loop mode. Reinitialising destroys the reference
+    // point captured at enable time, causing AWAKE to stick HIGH.
+    // =========================================================================
+    bool needSensorInit { wake == WakeSource::PowerOn || wake == WakeSource::Unknown };
 
-    // Configure ADXL367 for motion wake-up.
-    result = configureMotionSensor();
-    if (result < 0) {
-      LOG_ERR("ADXL367 configuration failed: %d!", result);
-      return false;
+    if (needSensorInit) {
+      LOG_INF("Fresh boot — initialising ADXL367...");
+      int result = m_motion.Init();
+      if (result < 0) {
+        LOG_ERR("ADXL367 init failed: %d!", result);
+        return false;
+      }
+      LOG_INF("ADXL367 initialised.");
+
+      result = configureMotionSensor();
+      if (result < 0) {
+        LOG_ERR("ADXL367 configuration failed: %d!", result);
+        return false;
+      }
+      LOG_INF("ADXL367 configured for wake-up mode.");
+    } else {
+      LOG_INF("System OFF wake — ADXL367 already running, skipping init.");
     }
-    LOG_INF("ADXL367 configured for wake-up mode.");
 
     LOG_INF("Hardware initialisation complete.");
     return true;
@@ -243,17 +254,19 @@ namespace alc
     }
 
     // =========================================================================
-    // AWAKE was HIGH at boot — real movement. Poll until it clears.
-    // Note: configureMotionSensor() has already run (resets ADXL367), so we
-    // poll the freshly-configured sensor. AWAKE will reassert if the device
-    // is still displaced from its new reference point.
+    // AWAKE was HIGH at boot — real movement. Poll P0.11 until it clears.
+    // The ADXL367 is NOT reinitialised on System OFF wake — its reference
+    // point from enable time is preserved, so AWAKE clears when the device
+    // returns to the home position.
+    // Using GPIO read instead of status register to avoid clearing ACT/INACT
+    // flags which can interfere with the loop mode state machine.
     // =========================================================================
-    LOG_INF("Polling AWAKE until device returns to rest...");
+    LOG_INF("Polling AWAKE (P0.11) until device returns to rest...");
 
     int64_t startTime { k_uptime_get() };
     uint32_t elapsed { 0 };
 
-    while (m_motion.IsAwake() && (elapsed < M_AWAKE_TIMEOUT_MS)) {
+    while ((nrf_gpio_pin_read(PIN_ACCEL_INT) != 0) && (elapsed < M_AWAKE_TIMEOUT_MS)) {
       k_msleep(M_AWAKE_POLL_MS);
       elapsed = static_cast<uint32_t>(k_uptime_get() - startTime);
 
@@ -304,7 +317,6 @@ namespace alc
       // Already sent all 3 notifications — no more timers.
       if (stage >= M_DOOR_OPEN_MAX_STAGE) {
         LOG_INF("All %u door-open notifications sent — no more timers.", M_DOOR_OPEN_MAX_STAGE);
-        configureMotionSensor();
         return;
       }
 
@@ -326,21 +338,11 @@ namespace alc
       LOG_INF("Door-open timer stage %u started: %u seconds. Entering System OFF.",
               stage + 1, duration);
 
-      // Recalibrate ADXL367 so a door-close also triggers a wake.
-      configureMotionSensor();
+      // No ADXL367 recalibration needed — the reference point from enable time
+      // is preserved. When the door closes (device returns to home), AWAKE clears
+      // and then reasserts on the next displacement, triggering a rising edge wake.
 
       return;
-    }
-
-    // AWAKE timed out but device is at home — recalibrate to clear.
-    if (elapsed >= M_AWAKE_TIMEOUT_MS) {
-      LOG_INF("AWAKE stuck at home - recalibrating ADXL367...");
-      int recalResult { configureMotionSensor() };
-      if (recalResult < 0) {
-        LOG_ERR("Recalibration failed: %d", recalResult);
-      } else {
-        LOG_INF("Recalibration complete.");
-      }
     }
 
     // =========================================================================
@@ -463,11 +465,8 @@ namespace alc
       setDoorOpenStage(0);
     }
 
-    // Recalibrate ADXL367 so door-close triggers a new accelerometer wake.
-    int recalResult = configureMotionSensor();
-    if (recalResult < 0) {
-      LOG_ERR("ADXL367 recalibration failed: %d", recalResult);
-    }
+    // No ADXL367 recalibration needed — reference point from enable time
+    // is preserved. Door-close will naturally trigger a rising edge wake.
 
     LOG_INF("Timer wake handling complete.");
   }
@@ -985,6 +984,12 @@ namespace alc
     if (strstr(message, "\"poll_interval\"")) {
       return MqttCommand::SET_POLL_INTERVAL;
     }
+    if (strstr(message, "\"calibrate\"")) {
+      return MqttCommand::CALIBRATE;
+    }
+    if (strstr(message, "\"report_position\"")) {
+      return MqttCommand::REPORT_POSITION;
+    }
 
     return MqttCommand::UNKNOWN;
   }
@@ -1160,6 +1165,68 @@ namespace alc
         }
         break;
 
+      case MqttCommand::CALIBRATE:
+        LOG_INF("Calibrate command received.");
+        {
+          LOG_INF("Calibrating home position (32 samples)...");
+          constexpr int NUM_SAMPLES { 32 };
+          constexpr int SAMPLE_INTERVAL_MS { 50 };
+          int32_t sumX { 0 }, sumY { 0 }, sumZ { 0 };
+          int validSamples { 0 };
+
+          for (int i = 0; i < NUM_SAMPLES; i++) {
+            int16_t sx, sy, sz;
+            if (m_motion.ReadAxes(sx, sy, sz) == 0) {
+              sumX += sx;
+              sumY += sy;
+              sumZ += sz;
+              validSamples++;
+            }
+            k_msleep(SAMPLE_INTERVAL_MS);
+          }
+
+          if (validSamples > 0) {
+            int16_t avgX = static_cast<int16_t>(sumX / validSamples);
+            int16_t avgY = static_cast<int16_t>(sumY / validSamples);
+            int16_t avgZ = static_cast<int16_t>(sumZ / validSamples);
+            setHomePosition(avgX, avgY, avgZ);
+            LOG_INF("Home position calibrated: X=%d Y=%d Z=%d mg (%d samples)",
+                    avgX, avgY, avgZ, validSamples);
+          } else {
+            LOG_ERR("Calibration failed — no valid samples.");
+          }
+        }
+        sendConfigStatus();
+        break;
+
+      case MqttCommand::REPORT_POSITION:
+        LOG_INF("Report position command received.");
+        {
+          int16_t cx { 0 }, cy { 0 }, cz { 0 };
+          m_motion.ReadAxes(cx, cy, cz);
+
+          int16_t hx, hy, hz;
+          getHomePosition(hx, hy, hz);
+
+          char topic[64];
+          char msg[256];
+          int len { snprintf(msg, sizeof(msg),
+                             "{\"current_x\":%d,"
+                             "\"current_y\":%d,"
+                             "\"current_z\":%d,"
+                             "\"home_x\":%d,"
+                             "\"home_y\":%d,"
+                             "\"home_z\":%d,"
+                             "\"home_calibrated\":%s}",
+                             cx, cy, cz, hx, hy, hz,
+                             isHomeCalibrated() ? "true" : "false") };
+
+          buildTopic(topic, sizeof(topic), M_SUFFIX_STATUS);
+          LOG_INF("Sending position report: %s", msg);
+          m_mqtt.Publish(topic, msg, len, false);
+        }
+        break;
+
       default:
         LOG_WRN("Unknown command received.");
         break;
@@ -1307,36 +1374,29 @@ namespace alc
     nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
     nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
 
-    // Read ADXL367 status to clear any pending interrupt event flags.
-    Adxl367::Status status;
-    m_motion.ReadStatus(status);
-    LOG_INF("ADXL367 status: AWAKE=%d", status.awake);
-
-    // Wait for ADXL367 to return to inactive state (AWAKE=0).
+    // Wait for ADXL367 AWAKE to clear (P0.11 = 0).
     // This is critical: the GPIO latch only captures rising edges.
-    // If we enter System OFF while AWAKE=1, and it goes low during boot,
+    // If we enter System OFF while AWAKE=1, and it clears during boot,
     // no rising edge occurs and the latch won't be set on wake.
-    if (status.awake) {
+    // Use GPIO read instead of status register to avoid side effects.
+    uint32_t awakePin { nrf_gpio_pin_read(PIN_ACCEL_INT) };
+    LOG_INF("ADXL367 AWAKE (P0.11): %u", awakePin);
+
+    if (awakePin != 0) {
       LOG_INF("Waiting for ADXL367 to return to inactive state...");
 
       constexpr uint32_t POLL_INTERVAL_MS { 100 };
-      constexpr uint32_t TIMEOUT_MS { 5000 };  // 5 second timeout.
+      constexpr uint32_t TIMEOUT_MS { 5000 };
       uint32_t elapsed { 0 };
 
-      while (m_motion.IsAwake() && (elapsed < TIMEOUT_MS)) {
+      while ((nrf_gpio_pin_read(PIN_ACCEL_INT) != 0) && (elapsed < TIMEOUT_MS)) {
         k_msleep(POLL_INTERVAL_MS);
         elapsed += POLL_INTERVAL_MS;
       }
 
       if (elapsed >= TIMEOUT_MS) {
-        // AWAKE stuck HIGH. Re-run loop mode startup sequence with dummy
-        // thresholds to force an activity→inactivity cycle and clear AWAKE.
-        LOG_WRN("AWAKE stuck HIGH — re-running loop mode init to clear...");
-        int recalResult { configureMotionSensor() };
-        if (recalResult < 0) {
-          LOG_ERR("Loop mode re-init failed: %d — forcing system restart.", recalResult);
-          sys_reboot(SYS_REBOOT_COLD);
-        }
+        LOG_ERR("AWAKE stuck HIGH after %u ms — forcing system restart.", TIMEOUT_MS);
+        sys_reboot(SYS_REBOOT_COLD);
       } else {
         LOG_INF("ADXL367 returned to inactive state after %u ms.", elapsed);
       }

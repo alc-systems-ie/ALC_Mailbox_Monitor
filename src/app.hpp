@@ -48,7 +48,7 @@ namespace alc
   constexpr uint8_t M_DOOR_OPEN_MAX_STAGE { 3 };
 
   // ADXL367 defaults (configurable via MQTT).
-  constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 150 };   // Activity threshold in mg (detects ~15° door opening).
+  constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 200 };   // Activity threshold in mg (detects ~15° door opening).
   constexpr uint8_t M_ACTIVITY_TIME { 1 };              // Activity time in samples.
   constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 150 }; // Inactivity threshold in mg (referenced mode).
   constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
@@ -98,6 +98,8 @@ namespace alc
     ENABLE,
     DISABLE,
     SET_POLL_INTERVAL,
+    CALIBRATE,
+    REPORT_POSITION,
     UNKNOWN
   };
 
@@ -194,7 +196,7 @@ namespace alc
        * This is the minimal init needed for OPEN events.
        * @return true on success.
        */
-      bool initHardware();
+      bool initHardware(WakeSource wake);
 
       /**
        * @brief Initialise network hardware (modem, MQTT).
