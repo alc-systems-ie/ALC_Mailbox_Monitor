@@ -409,12 +409,12 @@ When the door is left open (case 3), the nPM1300 GP Timer sends up to 3 escalati
 **Edge case — gust of wind:** If the door is open and a gust triggers an accelerometer wake while a stage timer is running, the MCU boots, detects NOT HOME (case 3 again), and restarts the timer at the current stage. The existing timer is explicitly stopped before starting the new one to ensure deterministic behaviour. The stage does not advance — only a timer expiry advances the stage.
 
 **Wake sources for System OFF:**
-- P0.11 (ADXL367 INT1): Motion detection — always enabled.
+- P0.11 (ADXL367 INT1): Motion detection — always enabled. Sense polarity set dynamically: SENSE_HIGH when at home (wake on displacement), SENSE_LOW when displaced (wake on door close).
 - P0.02 (nPM1300 SHPHLD GPIO): Timer expiry — always enabled (no-op if no timer running).
 
-**Door close during escalation:** When the door is closed (device returns to home), the ADXL367 reference from enable time causes AWAKE to clear and then reassert on the next displacement. The resulting rising edge on P0.11 wakes the MCU, which classifies Case 2 (HOME), stops the timer, and resets the stage to 0.
+**Door close during escalation:** When the door is closed (device returns to home), AWAKE clears. Since P0.11 was configured for SENSE_LOW before System OFF, the falling edge sets the GPIO latch and wakes the MCU. At boot, AWAKE=0 and `door_open_stage > 0`, so the event is classified as Case 1b (door close). The timer is stopped, stage is reset to 0, and `mailbox_visited` is sent. `configureWakeSources()` then sees AWAKE=0 and reconfigures P0.11 for SENSE_HIGH (rising edge) — ready for the next displacement.
 
-**Power consideration:** During the initial wake, the MCU polls AWAKE via P0.11 (up to 15s timeout). After classifying as NOT HOME, it enters System OFF and only wakes briefly on each timer expiry to send a notification.
+**Power consideration:** During the initial wake, the MCU polls AWAKE via P0.11 (up to 15s timeout). After classifying as NOT HOME, it enters System OFF immediately (no polling delay) with SENSE_LOW and only wakes briefly on each timer expiry to send a notification, or on the falling edge when the door closes.
 
 ### FIFO Configuration
 
