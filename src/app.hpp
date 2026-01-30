@@ -43,8 +43,8 @@ namespace alc
   // Door-open escalating timer durations (seconds).
   // Stage 1: 4 minutes, Stage 2: 1 hour, Stage 3: 2 hours.
   // Testing values: 20s / 30s / 40s — swap comments for production.
-  constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 20, 30, 40 };     // Testing.
-  // constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 240, 3600, 7200 }; // Production.
+  // constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 20, 30, 40 };     // Testing.
+  constexpr uint32_t M_DOOR_OPEN_DURATIONS[] { 240, 3600, 7200 }; // Production.
   constexpr uint8_t M_DOOR_OPEN_MAX_STAGE { 3 };
 
   // ADXL367 defaults (configurable via MQTT).
@@ -222,8 +222,7 @@ namespace alc
        * @param smsSuppressed Whether to suppress SMS notification.
        * @param type Event type (MailboxVisited or MailboxOpen).
        */
-      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type,
-                           uint8_t doorOpenStage = 0);
+      bool sendMailboxEvent(uint32_t timestamp, bool smsSuppressed, EventType type, uint8_t doorOpenStage = 0);
 
       /**
        * @brief Send all buffered mail events.

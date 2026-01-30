@@ -103,7 +103,7 @@ namespace alc
     shutdownModem();
 
     // Small delay to allow logs to flush.
-    k_msleep(100);
+    k_msleep(50);
 
     // Enter System OFF - does not return.
     enterSystemOff();
@@ -1292,7 +1292,14 @@ namespace alc
       }
 
       if (elapsed >= TIMEOUT_MS) {
-        LOG_WRN("Timeout waiting for AWAKE to clear - proceeding anyway.");
+        // AWAKE stuck HIGH. Re-run loop mode startup sequence with dummy
+        // thresholds to force an activity→inactivity cycle and clear AWAKE.
+        LOG_WRN("AWAKE stuck HIGH — re-running loop mode init to clear...");
+        int recalResult { configureMotionSensor() };
+        if (recalResult < 0) {
+          LOG_ERR("Loop mode re-init failed: %d — forcing system restart.", recalResult);
+          sys_reboot(SYS_REBOOT_COLD);
+        }
       } else {
         LOG_INF("ADXL367 returned to inactive state after %u ms.", elapsed);
       }
@@ -1307,7 +1314,8 @@ namespace alc
     LOG_INF("INT1 (P0.%d) state: %d (must be 0 for wake to work)", PIN_ACCEL_INT, pinState);
 
     if (pinState != 0) {
-      LOG_WRN("INT1 is HIGH - device may wake immediately!");
+      LOG_ERR("INT1 still HIGH after recovery — forcing system restart.");
+      sys_reboot(SYS_REBOOT_COLD);
     }
 
     nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_HIGH);
@@ -1370,8 +1378,7 @@ namespace alc
 
         // Log progress every 30 seconds.
         if ((elapsed_ms % 30000) == 0) {
-          LOG_INF("Waiting for timer... %u/%u seconds",
-                  elapsed_ms / 1000, m_config.mailWindowSecs);
+          LOG_INF("Waiting for timer... %u/%u seconds", elapsed_ms / 1000, m_config.mailWindowSecs);
         }
       }
 
