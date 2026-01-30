@@ -48,9 +48,9 @@ namespace alc
   constexpr uint8_t M_DOOR_OPEN_MAX_STAGE { 3 };
 
   // ADXL367 defaults (configurable via MQTT).
-  constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 250 };   // Activity threshold in mg.
+  constexpr uint16_t M_ACTIVITY_THRESHOLD_MG { 150 };   // Activity threshold in mg (detects ~15° door opening).
   constexpr uint8_t M_ACTIVITY_TIME { 1 };              // Activity time in samples.
-  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 250 }; // Inactivity threshold in mg (referenced mode).
+  constexpr uint16_t M_INACTIVITY_THRESHOLD_MG { 150 }; // Inactivity threshold in mg (referenced mode).
   constexpr uint8_t M_INACTIVITY_TIME { 10 };           // Inactivity time in samples.
 
   // Provisioning mode poll interval limits (seconds).

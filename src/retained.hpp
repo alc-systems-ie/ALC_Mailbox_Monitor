@@ -71,7 +71,7 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D414952;  // "MAIR" - version 7: door_open_stage in BufferedEvent.
+    static constexpr uint32_t MAGIC = 0x4D414954;  
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
@@ -86,6 +86,11 @@ struct RetainedState {
     uint8_t activityTime;                          ///< ADXL367 activity time (samples).
     uint16_t inactivityThresholdMg;                ///< ADXL367 inactivity threshold (mg).
     uint8_t inactivityTime;                        ///< ADXL367 inactivity time (samples).
+
+    int16_t homeX;                                 ///< Calibrated home position X (mg).
+    int16_t homeY;                                 ///< Calibrated home position Y (mg).
+    int16_t homeZ;                                 ///< Calibrated home position Z (mg).
+    bool homeCalibrated;                           ///< True if home position has been calibrated.
 
     BufferedEvent events[BUFFER_HARDWARE_MAX];     ///< Event buffer, oldest at index 0.
 };
@@ -241,5 +246,20 @@ void setPollInterval(uint16_t seconds);
  * @return Poll interval in seconds.
  */
 uint16_t getPollInterval();
+
+/**
+ * @brief Store calibrated home position.
+ */
+void setHomePosition(int16_t x, int16_t y, int16_t z);
+
+/**
+ * @brief Retrieve calibrated home position.
+ */
+void getHomePosition(int16_t& x, int16_t& y, int16_t& z);
+
+/**
+ * @brief Check if home position has been calibrated.
+ */
+bool isHomeCalibrated();
 
 } // namespace alc

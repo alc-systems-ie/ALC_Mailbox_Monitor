@@ -221,10 +221,15 @@ namespace alc
     constexpr uint32_t M_AWAKE_TIMEOUT_MS { 15000 };  // 15 seconds.
     constexpr uint32_t M_AWAKE_POLL_MS { 200 };
 
-    // Home position (flat on desk — adjust for mounted orientation).
-    constexpr int16_t M_HOME_X { 0 };
-    constexpr int16_t M_HOME_Y { 0 };
-    constexpr int16_t M_HOME_Z { -1000 };  // Gravity on Z-axis when flat.
+    // Home position from calibration (or defaults if uncalibrated).
+    int16_t M_HOME_X, M_HOME_Y, M_HOME_Z;
+    getHomePosition(M_HOME_X, M_HOME_Y, M_HOME_Z);
+    if (!isHomeCalibrated()) {
+      LOG_WRN("Home position not calibrated — using defaults (%d, %d, %d)",
+              M_HOME_X, M_HOME_Y, M_HOME_Z);
+    } else {
+      LOG_INF("Using calibrated home: X=%d Y=%d Z=%d mg", M_HOME_X, M_HOME_Y, M_HOME_Z);
+    }
 
     LOG_INF("AWAKE at boot: %s", m_awakeAtBoot ? "YES (motion ongoing)" : "NO (bump)");
 
@@ -1104,6 +1109,38 @@ namespace alc
 
       case MqttCommand::ENABLE:
         LOG_INF("Enable command received.");
+
+        // Calibrate home position from current accelerometer readings.
+        {
+          LOG_INF("Calibrating home position (32 samples)...");
+          constexpr int NUM_SAMPLES { 32 };
+          constexpr int SAMPLE_INTERVAL_MS { 50 };
+          int32_t sumX { 0 }, sumY { 0 }, sumZ { 0 };
+          int validSamples { 0 };
+
+          for (int i = 0; i < NUM_SAMPLES; i++) {
+            int16_t sx, sy, sz;
+            if (m_motion.ReadAxes(sx, sy, sz) == 0) {
+              sumX += sx;
+              sumY += sy;
+              sumZ += sz;
+              validSamples++;
+            }
+            k_msleep(SAMPLE_INTERVAL_MS);
+          }
+
+          if (validSamples > 0) {
+            int16_t avgX = static_cast<int16_t>(sumX / validSamples);
+            int16_t avgY = static_cast<int16_t>(sumY / validSamples);
+            int16_t avgZ = static_cast<int16_t>(sumZ / validSamples);
+            setHomePosition(avgX, avgY, avgZ);
+            LOG_INF("Home position calibrated: X=%d Y=%d Z=%d mg (%d samples)",
+                    avgX, avgY, avgZ, validSamples);
+          } else {
+            LOG_ERR("Calibration failed — no valid samples. Using defaults.");
+          }
+        }
+
         setEnabled(true);
         break;
 
