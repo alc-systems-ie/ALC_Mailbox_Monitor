@@ -26,10 +26,12 @@ minicom -D /dev/tty.usbmodem* -b 115200
 Single wake event per mail delivery cycle:
 
 1. **System OFF**: Device sleeps (~180nA, ADXL367 wake-up mode)
-2. **Motion detected**: ADXL367 AWAKE rises → MCU wakes from System OFF
-3. **Poll AWAKE**: MCU stays awake polling until AWAKE clears (door closed)
+2. **Motion detected**: ADXL367 AWAKE rises → MCU wakes from System OFF (SENSE_HIGH)
+3. **Poll AWAKE**: MCU stays awake polling until AWAKE clears (door closed) or 15s timeout
 4. **Send event**: Connect to MQTT, send `mailbox_visited` or `mailbox_open`, disconnect
-5. **System OFF**: Return to sleep
+5. **System OFF**: Return to sleep with appropriate sense polarity:
+   - AWAKE=0 (home): SENSE_HIGH — wake on next displacement (rising edge)
+   - AWAKE=1 (displaced): SENSE_LOW — wake when door closes (falling edge)
 
 The nPM1300 GP Timer drives an escalating door-open notification sequence when the door is left open. It also handles fresh boot initialisation (3s timer to establish ready state) and may be used for future heartbeat timing.
 
@@ -293,11 +295,16 @@ The ADXL367 runs autonomously during System OFF at ~180nA in loop mode with auto
 
 Always use `nrf_gpio_pin_read(PIN_ACCEL_INT)` to check AWAKE state, never `m_motion.IsAwake()` (which reads status register 0x0B). Reading the status register clears ACT/INACT flags, which can interfere with the loop mode state machine and prevent autosleep transitions.
 
-### ADXL367 AWAKE State Before System OFF
+### ADXL367 AWAKE Sense Polarity Before System OFF
 
-The GPIO latch only captures **rising edges**. Before entering System OFF, the firmware waits for AWAKE to clear (P0.11 = 0). If AWAKE=1 when entering System OFF, and it clears during boot, no rising edge occurs and the latch won't be set — causing wake source detection to fail.
+Before entering System OFF, `configureWakeSources()` reads P0.11 and configures the appropriate sense polarity:
 
-See `configureWakeSources()` in `app.cpp` for the polling logic (5s timeout, 100ms poll interval). If AWAKE is stuck HIGH after timeout, the device forces a system restart.
+- **AWAKE=0 (home):** `SENSE_HIGH` with pulldown — rising edge wake on next displacement. This is the normal path after a mailbox_visited event.
+- **AWAKE=1 (displaced):** `SENSE_LOW` with pullup — falling edge wake when the door closes and AWAKE clears. This is the door-open path.
+
+**Critical:** The ADXL367 is NEVER re-initialised in `configureWakeSources()`. Re-initialising would capture a new reference at the displaced position, causing AWAKE to malfunction on subsequent wakes (AWAKE stays HIGH at home because "home" is now a displacement from the new reference). The sensor is left running in measurement mode with its original reference from enable time.
+
+The GPIO latch captures edges matching the configured sense polarity. When SENSE_LOW is configured, a falling edge on P0.11 sets the latch and wakes the MCU. At boot, `main.cpp` sees the accelerometer latch SET with P0.11=0 (AWAKE cleared), and the motion handler classifies this as a door-close event when `door_open_stage > 0`.
 
 ### ADXL367 Loop Mode with Referenced Activity/Inactivity
 
@@ -349,19 +356,21 @@ In loop mode, AWAKE starts HIGH on power-up and won't clear until a full activit
 
 ### Motion Detection State Machine
 
-The approach uses a single-wake design with three event classifications:
+The approach uses a single-wake design with four event classifications:
 
-1. **Wake from System OFF** (ADXL367 AWAKE rising edge on P0.11)
+1. **Wake from System OFF** (P0.11 edge — rising or falling depending on sense polarity)
 2. **Capture AWAKE state** at boot (before any driver init, in `main.cpp`)
 3. **Classify event:**
 
-**Case 1 (Bump):** AWAKE was LOW at boot — motion ended before MCU started. Ignored.
+**Case 1a (Bump):** AWAKE was LOW at boot, `door_open_stage == 0` — brief motion ended before MCU started. Ignored.
+
+**Case 1b (Door close):** AWAKE was LOW at boot, `door_open_stage > 0` — falling-edge wake from SENSE_LOW. Door closed, device returned to home. Stop escalation timer, reset stage to 0, send `mailbox_visited` event.
 
 **Case 2 (Mailbox visited):** AWAKE was HIGH at boot, polls P0.11 until AWAKE clears, device settles at home position. Send `mailbox_visited` event. If an escalating door-open timer is running, stop it and reset the stage to 0.
 
-**Case 3 (Door left open):** AWAKE was HIGH at boot, 15s AWAKE timeout fires (device displaced from home, AWAKE stays HIGH). Starts the escalating door-open timer sequence (see below).
+**Case 3 (Door left open):** AWAKE was HIGH at boot, 15s AWAKE timeout fires (device displaced from home, AWAKE stays HIGH). Starts the escalating door-open timer sequence (see below). Enters System OFF with SENSE_LOW on P0.11 so the falling edge when the door closes will wake the MCU.
 
-**Important:** The ADXL367 is NOT reinitialised on System OFF wakes. The reference point from enable time is preserved, so AWAKE correctly reflects displacement from the true home position. When the door closes (device returns to home), AWAKE clears naturally, and the next displacement triggers a rising edge wake — no recalibration needed.
+**Important:** The ADXL367 is NOT reinitialised on System OFF wakes. The reference point from enable time is preserved, so AWAKE correctly reflects displacement from the true home position.
 
 ### Home Position Calibration
 

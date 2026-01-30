@@ -245,9 +245,58 @@ namespace alc
     LOG_INF("AWAKE at boot: %s", m_awakeAtBoot ? "YES (motion ongoing)" : "NO (bump)");
 
     // =========================================================================
-    // Case 1: AWAKE was already LOW at boot — brief bump.
+    // Case 1: AWAKE was already LOW at boot.
+    //
+    // Two sub-cases:
+    //   a) Bump — brief motion, AWAKE rose and fell before MCU booted.
+    //      No door-open timer running. Ignore.
+    //   b) Door close — device was displaced (door open), AWAKE was HIGH,
+    //      P0.11 was configured for SENSE_LOW (falling edge). Door closed,
+    //      device returned to home, AWAKE fell → wake. A door-open timer
+    //      stage is active, confirming this is a door-close event.
     // =========================================================================
     if (!m_awakeAtBoot) {
+      if (getDoorOpenStage() > 0) {
+        // Door-close event: stop escalation, send mailbox_visited.
+        LOG_INF("Classification: DOOR CLOSE (falling-edge wake, stage %u active)",
+                getDoorOpenStage());
+        LOG_INF("Stopping door-open timer stage %u (door closed).", getDoorOpenStage());
+        m_pmic.TimerStop();
+        m_pmic.TimerClearEvent();
+        m_pmic.TimerDisableInterrupt();
+        setDoorOpenStage(0);
+
+        LOG_INF("╔════════════════════════════════════════╗");
+        LOG_INF("║       MAILBOX VISITED                  ║");
+        LOG_INF("╚════════════════════════════════════════╝");
+
+        uint32_t timestamp = static_cast<uint32_t>(k_uptime_get() / 1000);
+        bufferMailEvent(timestamp, false);
+
+        if (!initNetworkHardware()) {
+          LOG_ERR("Network init failed - event buffered for later.");
+          LOG_INF("Buffered events: %d", getBufferedEventCount());
+          return;
+        }
+
+        if (connectToCloud()) {
+          if (sendBufferedEvents()) {
+            LOG_INF("All buffered events sent successfully.");
+            sendBatteryStatus();
+            collectMqttCommands();
+          } else {
+            LOG_ERR("Failed to send some buffered events!");
+          }
+          disconnectFromCloud();
+        } else {
+          LOG_ERR("Failed to connect to cloud - events buffered for later.");
+          LOG_INF("Buffered events: %d", getBufferedEventCount());
+        }
+
+        LOG_INF("Door-close wake handling complete.");
+        return;
+      }
+
       LOG_INF("Classification: BUMP (AWAKE cleared before boot)");
       LOG_INF("Ignoring spurious wake - returning to sleep.");
       return;
@@ -1389,56 +1438,32 @@ namespace alc
     nrf_gpio_pin_latch_clear(PIN_ACCEL_INT);
     nrf_gpio_pin_latch_clear(PIN_PMIC_INT);
 
-    // Wait for ADXL367 AWAKE to clear (P0.11 = 0).
-    // This is critical: the GPIO latch only captures rising edges.
-    // If we enter System OFF while AWAKE=1, and it clears during boot,
-    // no rising edge occurs and the latch won't be set on wake.
-    // Use GPIO read instead of status register to avoid side effects.
+    // =========================================================================
+    // Check P0.11 (AWAKE) state and configure the appropriate sense polarity.
+    // If AWAKE=0 (device at home), use SENSE_HIGH to wake on next displacement.
+    // If AWAKE=1 (device displaced / door open), use SENSE_LOW to wake when
+    // the door closes and AWAKE clears.
+    //
+    // No polling or waiting here — the event classification has already been
+    // done by handleMotionWake(). We just need to enter System OFF as quickly
+    // as possible with the correct wake polarity.
+    //
+    // The ADXL367 is NOT re-initialised — its reference point from enable
+    // time is preserved, so AWAKE correctly reflects displacement from the
+    // true home position.
+    // =========================================================================
     uint32_t awakePin { nrf_gpio_pin_read(PIN_ACCEL_INT) };
     LOG_INF("ADXL367 AWAKE (P0.11): %u", awakePin);
 
-    if (awakePin != 0) {
-      LOG_INF("Waiting for ADXL367 to return to inactive state...");
-
-      constexpr uint32_t POLL_INTERVAL_MS { 100 };
-      constexpr uint32_t TIMEOUT_MS { 5000 };
-      uint32_t elapsed { 0 };
-
-      while ((nrf_gpio_pin_read(PIN_ACCEL_INT) != 0) && (elapsed < TIMEOUT_MS)) {
-        k_msleep(POLL_INTERVAL_MS);
-        elapsed += POLL_INTERVAL_MS;
-      }
-
-      if (elapsed >= TIMEOUT_MS) {
-        // AWAKE stuck HIGH. Re-run loop mode startup sequence with dummy
-        // thresholds to force an activity→inactivity cycle and clear AWAKE.
-        // This is acceptable here — we're about to sleep, and the reference
-        // will be recaptured at the current (home) position.
-        LOG_WRN("AWAKE stuck HIGH — re-running loop mode init to clear...");
-        int recalResult { configureMotionSensor() };
-        if (recalResult < 0) {
-          LOG_ERR("Loop mode re-init failed: %d — forcing system restart.", recalResult);
-          sys_reboot(SYS_REBOOT_COLD);
-        }
-      } else {
-        LOG_INF("ADXL367 returned to inactive state after %u ms.", elapsed);
-      }
+    if (awakePin == 0) {
+      LOG_INF("AWAKE=0 (home) — wake on rising edge (next displacement).");
+      nrf_gpio_cfg_input(PIN_ACCEL_INT, NRF_GPIO_PIN_PULLDOWN);
+      nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_HIGH);
+    } else {
+      LOG_INF("AWAKE=1 (displaced) — wake on falling edge (door close).");
+      nrf_gpio_cfg_input(PIN_ACCEL_INT, NRF_GPIO_PIN_PULLUP);
+      nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_LOW);
     }
-
-    // Small delay for INT1 to settle after AWAKE clears.
-    k_msleep(10);
-
-    // Configure accelerometer INT1 - sense HIGH (AWAKE signal).
-    nrf_gpio_cfg_input(PIN_ACCEL_INT, NRF_GPIO_PIN_PULLDOWN);
-    uint32_t pinState { nrf_gpio_pin_read(PIN_ACCEL_INT) };
-    LOG_INF("INT1 (P0.%d) state: %d (must be 0 for wake to work)", PIN_ACCEL_INT, pinState);
-
-    if (pinState != 0) {
-      LOG_ERR("INT1 still HIGH after recovery — forcing system restart.");
-      sys_reboot(SYS_REBOOT_COLD);
-    }
-
-    nrf_gpio_cfg_sense_set(PIN_ACCEL_INT, NRF_GPIO_PIN_SENSE_HIGH);
 
     // Configure PMIC GPIO for timer wake (door-open / heartbeat).
     nrf_gpio_cfg_input(PIN_PMIC_INT, NRF_GPIO_PIN_PULLDOWN);

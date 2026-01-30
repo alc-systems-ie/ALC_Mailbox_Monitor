@@ -71,7 +71,7 @@ struct BufferedEvent {
  * sent due to connectivity issues.
  */
 struct RetainedState {
-    static constexpr uint32_t MAGIC = 0x4D414954;  
+    static constexpr uint32_t MAGIC = 0x4D414955;  
 
     uint32_t magic;                                ///< Validity marker.
     uint8_t event_count;                           ///< Number of buffered events (0 to max).
