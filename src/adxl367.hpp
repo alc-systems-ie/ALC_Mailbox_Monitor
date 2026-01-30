@@ -207,7 +207,7 @@ namespace alc
       /**
        * @brief Enter measurement mode with autosleep enabled.
        *
-       * Writes POWER_CTL = 0x07 (MEASURE=10, AUTOSLEEP=1).
+       * Writes POWER_CTL = 0x06 (MEASURE=10, AUTOSLEEP=1).
        * In loop mode, autosleep causes the device to enter wake-up mode
        * autonomously when inactivity is detected, and return to measurement
        * mode when activity is detected.

@@ -134,6 +134,18 @@ namespace alc {
   constexpr uint8_t M_THRESH_H_MASK       { 0x7F };
   constexpr uint8_t M_THRESH_L_MASK       { 0xFC };
 
+  // 14-bit data format masks.
+  constexpr uint16_t M_DATA_14BIT_MASK    { 0x3FFF };  // Bits [13:0].
+  constexpr uint16_t M_DATA_14BIT_SIGN    { 0x2000 };  // Bit 13 (sign bit).
+  constexpr int16_t  M_DATA_14BIT_EXTEND  { static_cast<int16_t>(0xC000) };  // Sign extension.
+
+  // Data register decode shifts.
+  constexpr uint8_t M_DATA_REG_H_SHIFT    { 6 };       // H[7:0] = D[13:6].
+  constexpr uint8_t M_DATA_REG_L_SHIFT    { 2 };       // L[7:2] = D[5:0].
+
+  // FIFO entries high byte mask (10-bit value: H[1:0] are MSBs).
+  constexpr uint8_t M_FIFO_ENTRIES_H_MASK { 0x03 };
+
   // Scale factors (mg per LSB).
   constexpr float M_SCALE_2G_MG           { 0.25f };
   constexpr float M_SCALE_4G_MG           { 0.5f };
@@ -326,17 +338,15 @@ namespace alc {
 
   int Adxl367::EnableMeasurementAutosleep()
   {
-    // POWER_CTL = 0x07: MEASURE=10 (measurement), AUTOSLEEP=1.
-    // No explicit WAKEUP bit — autosleep handles the transition to wake-up mode.
-    constexpr uint8_t M_POWER_CTL_MEAS_AUTOSLEEP { 0x06 };
-    int result { writeRegister(M_REG_POWER_CTL, M_POWER_CTL_MEAS_AUTOSLEEP) };
+    // Datasheet states 0x07, but MEASURE=0b11 is reserved. Correct value is 0x06.
+    constexpr uint8_t value { M_MEASURE_MEASUREMENT | M_AUTOSLEEP_MASK };
+    int result { writeRegister(M_REG_POWER_CTL, value) };
     if (result < 0) {
       LOG_ERR("Failed to enable measurement+autosleep: %d!", result);
       return result;
     }
 
-    LOG_INF("Measurement mode with autosleep enabled (POWER_CTL=0x%02X).",
-            M_POWER_CTL_MEAS_AUTOSLEEP);
+    LOG_INF("Measurement mode with autosleep enabled (POWER_CTL=0x%02X).", value);
     return 0;
   }
 
@@ -344,9 +354,7 @@ namespace alc {
 
   int Adxl367::SetRange(Range range)
   {
-    int result { updateRegister(M_REG_FILTER_CTL,
-                                static_cast<uint8_t>(range) << M_RANGE_SHIFT,
-                                M_RANGE_MASK) };
+    int result { updateRegister(M_REG_FILTER_CTL, static_cast<uint8_t>(range) << M_RANGE_SHIFT, M_RANGE_MASK) };
     if (result < 0) {
       LOG_ERR("Failed to set range: %d!", result);
       return result;
@@ -409,7 +417,7 @@ namespace alc {
     if (result < 0) { return result; }
 
     // FIFO_ENTRIES is 10-bit: H[1:0] are MSBs, L[7:0] are LSBs.
-    entries = static_cast<uint16_t>(((hi & 0x03) << 8) | lo);
+    entries = static_cast<uint16_t>(((hi & M_FIFO_ENTRIES_H_MASK) << 8) | lo);
     return 0;
   }
 
@@ -463,10 +471,10 @@ namespace alc {
         uint16_t raw16 { static_cast<uint16_t>((raw[offset] << 8) | raw[offset + 1]) };
 
         // Extract 14-bit signed value (bits [13:0]).
-        int16_t rawVal { static_cast<int16_t>(raw16 & 0x3FFF) };
+        int16_t rawVal { static_cast<int16_t>(raw16 & M_DATA_14BIT_MASK) };
         // Sign-extend from 14-bit.
-        if (rawVal & 0x2000) {
-          rawVal |= static_cast<int16_t>(0xC000);
+        if (rawVal & M_DATA_14BIT_SIGN) {
+          rawVal |= M_DATA_14BIT_EXTEND;
         }
 
         int16_t mg { static_cast<int16_t>(static_cast<float>(rawVal) * scale) };
@@ -610,10 +618,10 @@ namespace alc {
     float scale { getScaleFactor() };
 
     auto decode = [scale](uint8_t hi, uint8_t lo) -> int16_t {
-      int16_t rawVal { static_cast<int16_t>((hi << 6) | (lo >> 2)) };
+      int16_t rawVal { static_cast<int16_t>((hi << M_DATA_REG_H_SHIFT) | (lo >> M_DATA_REG_L_SHIFT)) };
       // Sign-extend from 14-bit.
-      if (rawVal & 0x2000) {
-        rawVal |= static_cast<int16_t>(0xC000);
+      if (rawVal & M_DATA_14BIT_SIGN) {
+        rawVal |= M_DATA_14BIT_EXTEND;
       }
       return static_cast<int16_t>(static_cast<float>(rawVal) * scale);
     };
@@ -635,9 +643,9 @@ namespace alc {
     }
 
     // Same format as data registers: H[7:0]=D[13:6], L[7:2]=D[5:0].
-    tempRaw = static_cast<int16_t>((raw[0] << 6) | (raw[1] >> 2));
-    if (tempRaw & 0x2000) {
-      tempRaw |= static_cast<int16_t>(0xC000);
+    tempRaw = static_cast<int16_t>((raw[0] << M_DATA_REG_H_SHIFT) | (raw[1] >> M_DATA_REG_L_SHIFT));
+    if (tempRaw & M_DATA_14BIT_SIGN) {
+      tempRaw |= M_DATA_14BIT_EXTEND;
     }
 
     return 0;
