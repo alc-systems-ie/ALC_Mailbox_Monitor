@@ -498,6 +498,16 @@ namespace alc
     LOG_INF("║           FRESH BOOT / RESET           ║");
     LOG_INF("╚════════════════════════════════════════╝");
 
+    // Reset door-open escalation stage — a reboot breaks the escalation
+    // context, so stale stage values must not carry over.
+    if (getDoorOpenStage() > 0) {
+      LOG_INF("Clearing stale door-open stage %u from previous session.", getDoorOpenStage());
+      m_pmic.TimerStop();
+      m_pmic.TimerClearEvent();
+      m_pmic.TimerDisableInterrupt();
+      setDoorOpenStage(0);
+    }
+
     // =========================================================================
     // Check if device is enabled for normal operation.
     // =========================================================================
