@@ -119,7 +119,7 @@ namespace alc
     g_retained.mailWindowSecs = 240;  // M_MAIL_WINDOW_SECS default.
     g_retained.activityThresholdMg = 150;  // M_ACTIVITY_THRESHOLD_MG default.
     g_retained.activityTime = 1;  // M_ACTIVITY_TIME default.
-    g_retained.inactivityThresholdMg = 150;  // M_INACTIVITY_THRESHOLD_MG default.
+    g_retained.inactivityThresholdMg = 250;  // M_INACTIVITY_THRESHOLD_MG default.
     g_retained.inactivityTime = 10;  // M_INACTIVITY_TIME default.
     g_retained.homeX = 0;
     g_retained.homeY = -1000;  // Default: gravity on -Y (vertical side-mount).
